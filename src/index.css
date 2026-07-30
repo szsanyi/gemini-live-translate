@@ -1,0 +1,133 @@
+/* Font import must precede all other statements (incl. the Tailwind import). */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* ==================== SEMANTIC COLOR VARIABLES ==================== */
+
+:root, [data-theme="light"] {
+  /* Backgrounds */
+  --bg-base:   #f7f9fb;
+  --bg-raised: #ffffff;
+  --bg-subtle: #f2f4f6;
+  --bg-muted:  #eceef0;
+
+  /* Borders */
+  --border-strong: #bbcac3;
+  --border-medium: #e0e3e5;
+  --border-faint:  #e6e8ea;
+
+  /* Text */
+  --text-primary:   #191c1e;
+  --text-secondary: #3c4a45;
+  --text-muted:     #6c7a75;
+
+  /* Accent (teal) */
+  --accent-primary: #006b57;
+  --accent-primary-hover: #005141;
+  --accent-primary-container: #00c2a0;
+  --accent-primary-tint: rgba(0, 107, 87, 0.07);
+  --accent-primary-border: rgba(0, 107, 87, 0.22);
+  --accent-card-border-l: #00c2a0;
+  --accent-glow: rgba(0, 107, 87, 0.18);
+}
+
+[data-theme="dark"] {
+  /* Backgrounds */
+  --bg-base:   #111519;
+  --bg-raised: #1c2330;
+  --bg-subtle: #161c24;
+  --bg-muted:  #252d38;
+
+  /* Borders */
+  --border-strong: #2d3845;
+  --border-medium: #222a36;
+  --border-faint:  #1c2430;
+
+  /* Text */
+  --text-primary:   #dde1e5;
+  --text-secondary: #8fa09a;
+  --text-muted:     #576360;
+
+  /* Accent (teal — lighter for dark bg) */
+  --accent-primary: #2dd4bf;
+  --accent-primary-hover: #5eead4;
+  --accent-primary-container: #0d9488;
+  --accent-primary-tint: rgba(45, 212, 191, 0.10);
+  --accent-primary-border: rgba(45, 212, 191, 0.25);
+  --accent-card-border-l: #2dd4bf;
+  --accent-glow: rgba(45, 212, 191, 0.18);
+}
+
+/* ==================== SURFACE CLASSES ==================== */
+
+.canvas-bg {
+  background-color: var(--bg-base);
+}
+
+.surface-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 1px 4px rgba(25, 28, 30, 0.06);
+}
+
+[data-theme="dark"] .surface-card {
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+}
+
+.surface-element {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-medium);
+}
+
+.surface-card-translating {
+  background: var(--accent-primary-tint);
+  border: 1px solid var(--accent-primary-border);
+  border-left: 3px solid var(--accent-card-border-l);
+}
+
+.surface-input-active {
+  background: var(--accent-primary-tint);
+  border: 1px solid var(--accent-primary-border);
+}
+
+/* ==================== GLOW EFFECTS ==================== */
+
+.glow-primary {
+  box-shadow: 0 0 18px var(--accent-glow);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 14px rgba(5, 150, 105, 0.22);
+}
+
+.glow-rose {
+  box-shadow: 0 0 18px rgba(239, 68, 68, 0.22);
+}
+
+/* ==================== ANIMATIONS ==================== */
+
+@keyframes pulse-gaze {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%       { transform: scale(1.03); opacity: 0.9; }
+}
+
+.animate-pulse-gaze {
+  animation: pulse-gaze 2s infinite ease-in-out;
+}
+
+/* ==================== SCROLLBARS ==================== */
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
