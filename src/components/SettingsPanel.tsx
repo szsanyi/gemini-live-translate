@@ -1,4 +1,4 @@
-import { Mic, Monitor, ArrowRightLeft, Settings, Sparkles, Check } from "lucide-react";
+import { Mic, Monitor, ArrowRightLeft, Settings, Sparkles, Check, Square, Volume2, VolumeX } from "lucide-react";
 import { ThemeConfig } from "../themes";
 import { AudioSourceType } from "../types";
 import { useLang } from "../i18n";
@@ -9,6 +9,8 @@ interface SettingsPanelProps {
   sourceLang: string;
   targetLang: string;
   bidirectional: boolean;
+  translate: boolean;
+  speak: boolean;
   audioSource: AudioSourceType;
   isActive: boolean;
   isSidebarMode: boolean;
@@ -19,6 +21,8 @@ interface SettingsPanelProps {
   onTargetChange: (code: string) => void;
   onSwapLangs: () => void;
   onBidirectionalToggle: () => void;
+  onTranslateToggle: () => void;
+  onSpeakToggle: () => void;
   onAudioSourceChange: (source: AudioSourceType) => void;
 }
 
@@ -27,6 +31,8 @@ export function SettingsPanel({
   sourceLang,
   targetLang,
   bidirectional,
+  translate,
+  speak,
   audioSource,
   isActive,
   isSidebarMode,
@@ -37,6 +43,8 @@ export function SettingsPanel({
   onTargetChange,
   onSwapLangs,
   onBidirectionalToggle,
+  onTranslateToggle,
+  onSpeakToggle,
   onAudioSourceChange,
 }: SettingsPanelProps) {
   const isOpenAI = model === "gpt-realtime-translate";
@@ -44,6 +52,9 @@ export function SettingsPanel({
   const srcAllowed = allowedSourceCodes(model);
   const tgtAllowed = allowedTargetCodes(model);
   const canBidirectional = supportsBidirectional(model);
+  // Without spoken output the model pair is dictated by capability, not taste:
+  // only 3.1 Flash Live can transcribe silently. Lock the picker and say why.
+  const modelLocked = isActive || !speak;
   // Catalogue order, filtered to what the active model supports (source and
   // target can differ — e.g. OpenAI accepts Hungarian input but can't speak it).
   const sourceOptions = LANGUAGES.filter((l) => srcAllowed.includes(l.code));
@@ -69,12 +80,12 @@ export function SettingsPanel({
             <button
               id="model-3.5-btn"
               onClick={() => onModelChange("models/gemini-3.5-live-translate-preview")}
-              disabled={isActive}
+              disabled={modelLocked}
               className={`px-3 py-2.5 text-left transition-all text-xs cursor-pointer ${
                 model === "models/gemini-3.5-live-translate-preview"
                   ? "bg-[var(--bg-raised)] text-[var(--text-primary)] border border-[var(--border-strong)] font-bold shadow-sm"
                   : "border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              } ${isActive ? "opacity-50 cursor-not-allowed" : ""}`}
+              } ${modelLocked ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <p className="font-bold flex items-center gap-1.5">
                 Gemini 3.5 Live Translate
@@ -86,12 +97,12 @@ export function SettingsPanel({
             <button
               id="model-3.1-btn"
               onClick={() => onModelChange("models/gemini-3.1-flash-live-preview")}
-              disabled={isActive}
+              disabled={modelLocked}
               className={`px-3 py-2.5 text-left transition-all text-xs cursor-pointer ${
                 model === "models/gemini-3.1-flash-live-preview"
                   ? "bg-[var(--bg-raised)] text-[var(--text-primary)] border border-[var(--border-strong)] font-bold shadow-sm"
                   : "border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              } ${isActive ? "opacity-50 cursor-not-allowed" : ""}`}
+              } ${modelLocked ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <p className="font-bold flex items-center gap-1.5">
                 Gemini 3.1 Live Flash
@@ -103,12 +114,12 @@ export function SettingsPanel({
             <button
               id="model-openai-btn"
               onClick={() => onModelChange("gpt-realtime-translate")}
-              disabled={isActive}
+              disabled={modelLocked}
               className={`px-3 py-2.5 text-left transition-all text-xs cursor-pointer ${
                 model === "gpt-realtime-translate"
                   ? "bg-[var(--bg-raised)] text-[var(--text-primary)] border border-[var(--border-strong)] font-bold shadow-sm"
                   : "border border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              } ${isActive ? "opacity-50 cursor-not-allowed" : ""}`}
+              } ${modelLocked ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <p className="font-bold flex items-center gap-1.5">
                 OpenAI Realtime Translate
@@ -118,9 +129,77 @@ export function SettingsPanel({
               </p>
             </button>
           </div>
+          {!speak && (
+            <p className="mt-2 text-[10px] text-[var(--text-muted)] bg-[var(--bg-subtle)] border border-[var(--border-medium)] rounded-lg px-2.5 py-1.5">
+              {tr("settings.modelLocked")}
+            </p>
+          )}
         </div>
 
-        {/* Language Selection */}
+        {/* Mode: translate at all, and speak the translation. Both are locked once
+            the session starts — switching mid-session would need a reconnect, and
+            the transcript would end up mixing modes. */}
+        <div className="mb-5">
+          <label className="block text-[10px] font-bold text-[var(--text-muted)] mb-2 uppercase tracking-widest">{tr("settings.mode")}</label>
+          <div className="flex flex-col gap-2">
+            <button
+              id="translate-toggle"
+              type="button"
+              onClick={onTranslateToggle}
+              disabled={isActive}
+              title={isActive ? tr("settings.lockedWhileActive") : undefined}
+              className={`w-full px-3.5 py-2.5 text-xs font-semibold border text-left flex items-center justify-between transition-all cursor-pointer ${
+                translate
+                  ? `${t.bgSoft} ${t.borderSoft} ${t.textLight} shadow-sm`
+                  : "border-[var(--border-medium)] bg-[var(--bg-base)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
+              } ${isActive ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              <span>{tr("settings.translate")}</span>
+              {translate
+                ? <Check className={`w-3.5 h-3.5 shrink-0 ${t.text}`} />
+                : <Square className="w-3.5 h-3.5 shrink-0 opacity-50" />}
+            </button>
+            {!translate && (
+              <p className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-subtle)] border border-[var(--border-medium)] rounded-lg px-2.5 py-1.5">
+                {tr("settings.translateHint")}
+              </p>
+            )}
+
+            <button
+              id="speak-toggle"
+              type="button"
+              onClick={onSpeakToggle}
+              disabled={isActive || !translate}
+              title={
+                !translate ? tr("settings.speakUnavailable")
+                : isActive ? tr("settings.lockedWhileActive")
+                : undefined
+              }
+              className={`w-full px-3.5 py-2.5 text-xs font-semibold border text-left flex items-center justify-between transition-all cursor-pointer ${
+                speak
+                  ? `${t.bgSoft} ${t.borderSoft} ${t.textLight} shadow-sm`
+                  : "border-[var(--border-medium)] bg-[var(--bg-base)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
+              } ${isActive || !translate ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              <span className="flex items-center gap-1.5">
+                {speak ? <Volume2 className="w-3.5 h-3.5 shrink-0" /> : <VolumeX className="w-3.5 h-3.5 shrink-0" />}
+                {tr("settings.speak")}
+              </span>
+              {speak
+                ? <Check className={`w-3.5 h-3.5 shrink-0 ${t.text}`} />
+                : <Square className="w-3.5 h-3.5 shrink-0 opacity-50" />}
+            </button>
+            {translate && !speak && (
+              <p className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-subtle)] border border-[var(--border-medium)] rounded-lg px-2.5 py-1.5">
+                {tr("settings.speakHint")}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Language Selection — in recording mode the source language still matters
+            (it is the spoken language, stored on every card); only the target and
+            the direction become meaningless. */}
         <div className="mb-5">
           <label className="block text-[10px] font-bold text-[var(--text-muted)] mb-2 uppercase tracking-widest">{tr("settings.languages")}</label>
           {isOpenAI && (
@@ -149,20 +228,20 @@ export function SettingsPanel({
               id="swap-langs"
               type="button"
               onClick={onSwapLangs}
-              disabled={!canSwap}
+              disabled={!canSwap || !translate}
               title={tr("settings.swap")}
               className="shrink-0 p-2 border border-[var(--border-medium)] bg-[var(--bg-base)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <ArrowRightLeft className="w-3.5 h-3.5" />
             </button>
 
-            <label className="flex-1 flex flex-col gap-1 min-w-0">
+            <label className={`flex-1 flex flex-col gap-1 min-w-0 ${translate ? "" : "opacity-50"}`}>
               <span className="text-[9px] font-mono text-[var(--text-muted)] uppercase tracking-wider">{tr("settings.targetLang")}</span>
               <select
                 id="target-lang"
                 value={targetLang}
                 onChange={(e) => onTargetChange(e.target.value)}
-                disabled={isActive}
+                disabled={isActive || !translate}
                 className="w-full px-2.5 py-2 text-xs font-semibold border border-[var(--border-medium)] bg-[var(--bg-base)] text-[var(--text-primary)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:border-[var(--border-strong)]"
               >
                 {targetOptions.map((l) => <option key={l.code} value={l.code}>{langName(l.code, uiLang)}</option>)}
@@ -175,12 +254,12 @@ export function SettingsPanel({
               id="bidirectional-toggle"
               type="button"
               onClick={onBidirectionalToggle}
-              disabled={isActive}
+              disabled={isActive || !translate}
               className={`mt-2.5 w-full px-3.5 py-2.5 text-xs font-semibold border text-left flex items-center justify-between transition-all cursor-pointer ${
                 bidirectional
                   ? `${t.bgSoft} ${t.borderSoft} ${t.textLight} shadow-sm`
                   : "border-[var(--border-medium)] bg-[var(--bg-base)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
-              } ${isActive ? "opacity-50 cursor-not-allowed" : ""}`}
+              } ${isActive || !translate ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <span>{tr("settings.bidirectional")}</span>
               {bidirectional

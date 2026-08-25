@@ -80,6 +80,23 @@ export function supportsBidirectional(model: string): boolean {
   return model === "models/gemini-3.1-flash-live-preview";
 }
 
+/**
+ * The only Live model that can be told to transcribe without speaking. Verified
+ * by probe: it delivers a full input transcription while emitting zero audio
+ * chunks. The 3.5 translate-preview is speech→speech and ignores such an
+ * instruction; OpenAI's endpoint is a translator by construction.
+ */
+export const TRANSCRIPTION_MODEL = "models/gemini-3.1-flash-live-preview";
+
+/**
+ * Resolve the Live model for a session. Silent sessions (no spoken output) are
+ * pinned to the transcription model regardless of what was selected, so the UI
+ * lock and the server agree without duplicating the rule.
+ */
+export function resolveLiveModel(model: string, speak: boolean): string {
+  return speak ? model : TRANSCRIPTION_MODEL;
+}
+
 /** Display name of a language code in the given interface language. */
 export function langName(code: string, ui: "en" | "hu"): string {
   const l = LANGUAGES.find((x) => x.code === code);

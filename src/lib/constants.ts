@@ -13,3 +13,17 @@ export const TURN_SILENCE_MS = 1500;
  * properly timed, real-time subtitle blocks instead of one big lump.
  */
 export const SEGMENT_SILENCE_MS = 1200;
+/**
+ * Idle time after the last change before the session is written to disk. Collapses
+ * a burst of segments into one write; the worst case on a crash is losing this
+ * much of the transcript.
+ */
+export const SESSION_AUTOSAVE_MS = 3000;
+/**
+ * How many times a recording may reconnect its provider session by itself before
+ * giving up and stopping. Bounded so a genuinely dead connection surfaces as a stop
+ * instead of an endless reconnect loop.
+ */
+export const MAX_SESSION_RECONNECTS = 5;
+/** Pause before an automatic reconnect, so a refused connection can't spin. */
+export const SESSION_RECONNECT_DELAY_MS = 800;

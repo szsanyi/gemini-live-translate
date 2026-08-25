@@ -1,110 +1,82 @@
-import { GoogleGenAI } from "@google/genai";
+import { runTextPrompt } from "./textModel.ts";
 
 /**
- * Conversation-summary provider. Fully configurable via env so the summary can
- * run on a different provider/key/model than the live translation:
- *
- *   SUMMARY_PROVIDER  gemini | openai | ollama   (default: gemini)
- *   SUMMARY_MODEL     model id                    (provider-specific default)
- *   SUMMARY_API_KEY   key                         (falls back to GEMINI/OPENAI key)
- *   SUMMARY_BASE_URL  base URL                    (OpenAI-compatible / Ollama host)
+ * Conversation-summary provider. The provider/key/model plumbing lives in
+ * textModel.ts (env: SUMMARY_PROVIDER / SUMMARY_MODEL / SUMMARY_API_KEY /
+ * SUMMARY_BASE_URL); this module only owns the prompts.
  */
-type Provider = "gemini" | "openai" | "ollama";
 
-interface SummaryConfig {
-  provider: Provider;
-  model: string;
-  apiKey: string;
-  baseUrl: string;
+/** Shortest and longest summary we ever ask for, in words. */
+export const SUMMARY_MIN_WORDS = 120;
+export const SUMMARY_MAX_WORDS = 1000;
+
+/**
+ * One summary word per this many transcript words. The summarizer input carries both
+ * the source and the translation, so a spoken minute (~150 words) arrives as ~300 —
+ * making a 40-minute meeting ~12 000 words in, ~600 words out.
+ */
+const COMPRESSION_RATIO = 20;
+
+/** One bullet point per this many transcript words. */
+const WORDS_PER_BULLET = 500;
+export const SUMMARY_MIN_BULLETS = 4;
+export const SUMMARY_MAX_BULLETS = 30;
+
+export interface SummaryDepth {
+  targetWords: number;
+  /** Minimum bullet points asked for — the lever the model actually follows. */
+  bullets: number;
+  sections: number;
+  /** Prompt fragment describing the expected shape, length and the no-padding rule. */
+  shape: string;
 }
 
-const DEFAULT_MODEL: Record<Provider, string> = {
-  gemini: "gemini-2.0-flash",
-  openai: "gpt-4o-mini",
-  ollama: "llama3.1",
-};
+/**
+ * How much summary a transcript deserves.
+ *
+ * Without this the prompt said only "concisely", so a two-minute exchange and a
+ * forty-minute meeting both came back as the same short paragraph — the long meeting
+ * lost most of its content. Length scales with the transcript, but the instruction
+ * also forbids padding: a long recording that genuinely says little must still yield a
+ * short summary, which is the caveat that makes scaling safe.
+ */
+export function summaryDepth(transcript: string): SummaryDepth {
+  const words = transcript.trim() ? transcript.trim().split(/\s+/).length : 0;
+  const scaledWords = Math.round(words / COMPRESSION_RATIO / 10) * 10;
+  const targetWords = Math.min(SUMMARY_MAX_WORDS, Math.max(SUMMARY_MIN_WORDS, scaledWords));
+  const bullets = Math.min(
+    SUMMARY_MAX_BULLETS,
+    Math.max(SUMMARY_MIN_BULLETS, Math.round(words / WORDS_PER_BULLET)),
+  );
+  const sections = Math.min(8, Math.max(2, Math.round(bullets / 5)));
 
-const DEFAULT_BASE_URL: Record<Provider, string> = {
-  gemini: "",
-  openai: "https://api.openai.com/v1",
-  ollama: "http://localhost:11434",
-};
+  // Measured: a word target alone is a weak lever — asking flash-lite for 520 words
+  // returned 212. A minimum item count and an explicit coverage rule are what the model
+  // actually follows, so the counts lead and the word figure is only a floor.
+  const structure = bullets <= SUMMARY_MIN_BULLETS
+    ? `Write at least ${bullets} bullet points.`
+    : `Write at least ${bullets} bullet points, grouped under ${sections} topic headings, ` +
+      `followed by separate "Decisions" and "Action items" lists whenever the conversation ` +
+      `contains any.`;
 
-function resolveConfig(): SummaryConfig {
-  const raw = (process.env.SUMMARY_PROVIDER || "gemini").toLowerCase();
-  const provider: Provider = raw === "openai" || raw === "ollama" ? raw : "gemini";
-  const fallbackKey =
-    provider === "gemini" ? process.env.GEMINI_API_KEY
-    : provider === "openai" ? process.env.OPENAI_API_KEY
-    : "";
   return {
-    provider,
-    model: process.env.SUMMARY_MODEL || DEFAULT_MODEL[provider],
-    apiKey: process.env.SUMMARY_API_KEY || fallbackKey || "",
-    baseUrl: process.env.SUMMARY_BASE_URL || DEFAULT_BASE_URL[provider],
+    targetWords,
+    bullets,
+    sections,
+    shape:
+      `${structure} Use at least ${targetWords} words in total. Cover every distinct topic, ` +
+      `decision, commitment, name, number and open question that was actually discussed — a ` +
+      `long meeting must not be reduced to a handful of generic lines. If the conversation ` +
+      `genuinely contains fewer distinct points than that, give fewer: never invent, pad or ` +
+      `repeat, and never restate the transcript verbatim.`,
   };
 }
 
 function buildPrompt(transcript: string, lang: string): string {
+  const { shape } = summaryDepth(transcript);
   return lang === "hu"
-    ? `Foglald össze tömören, lényegre törően az alábbi tolmácsolt beszélgetést magyarul. Emeld ki a fő témákat, a fontos pontokat és a teendőket, ha vannak. Ne ismételd szó szerint a szöveget.\n\n--- BESZÉLGETÉS ---\n${transcript}`
-    : `Summarize the following interpreted conversation concisely in English. Highlight the main topics, key points, and any action items. Do not repeat the text verbatim.\n\n--- CONVERSATION ---\n${transcript}`;
-}
-
-async function summarizeGemini(cfg: SummaryConfig, prompt: string): Promise<string> {
-  if (!cfg.apiKey) throw new Error("Missing API key for Gemini summary (SUMMARY_API_KEY or GEMINI_API_KEY).");
-  const ai = new GoogleGenAI({ apiKey: cfg.apiKey });
-  const response = await ai.models.generateContent({ model: cfg.model, contents: prompt });
-  const text = response.text;
-  if (!text) throw new Error("Empty summary response from Gemini.");
-  return text;
-}
-
-/** Extract plain text from an OpenAI Responses API result. */
-function extractResponsesText(data: any): string {
-  if (typeof data?.output_text === "string" && data.output_text) return data.output_text;
-  const out = data?.output;
-  if (Array.isArray(out)) {
-    const parts: string[] = [];
-    for (const item of out) {
-      if (Array.isArray(item?.content)) {
-        for (const c of item.content) {
-          if (c?.type === "output_text" && typeof c.text === "string") parts.push(c.text);
-        }
-      }
-    }
-    if (parts.length) return parts.join("");
-  }
-  return "";
-}
-
-async function summarizeOpenAI(cfg: SummaryConfig, prompt: string): Promise<string> {
-  if (!cfg.apiKey) throw new Error("Missing API key for OpenAI summary (SUMMARY_API_KEY or OPENAI_API_KEY).");
-  // The Responses API works for both legacy and newer models (some of which are
-  // not available on /chat/completions).
-  const res = await fetch(`${cfg.baseUrl}/responses`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({ model: cfg.model, input: prompt }),
-  });
-  if (!res.ok) throw new Error(`OpenAI summary HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  const text = extractResponsesText(data);
-  if (!text) throw new Error("Empty summary response from OpenAI.");
-  return text;
-}
-
-async function summarizeOllama(cfg: SummaryConfig, prompt: string): Promise<string> {
-  const res = await fetch(`${cfg.baseUrl}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: cfg.model, messages: [{ role: "user", content: prompt }], stream: false }),
-  });
-  if (!res.ok) throw new Error(`Ollama summary HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  const text = data?.message?.content;
-  if (!text) throw new Error("Empty summary response from Ollama.");
-  return text;
+    ? `Foglald össze lényegre törően az alábbi tolmácsolt beszélgetést magyarul. Emeld ki a fő témákat, a fontos pontokat és a teendőket, ha vannak. Ne ismételd szó szerint a szöveget.\n\n${shape}\n\n--- BESZÉLGETÉS ---\n${transcript}`
+    : `Summarize the following interpreted conversation in English. Highlight the main topics, key points, and any action items. Do not repeat the text verbatim.\n\n${shape}\n\n--- CONVERSATION ---\n${transcript}`;
 }
 
 /**
@@ -113,18 +85,7 @@ async function summarizeOllama(cfg: SummaryConfig, prompt: string): Promise<stri
  * otherwise English).
  */
 export async function generateSummary(transcript: string, lang: string): Promise<string> {
-  const cfg = resolveConfig();
-  const prompt = buildPrompt(transcript, lang);
-  return runPrompt(cfg, prompt);
-}
-
-/** Dispatch a prompt to the configured provider and return the raw text. */
-function runPrompt(cfg: SummaryConfig, prompt: string): Promise<string> {
-  switch (cfg.provider) {
-    case "openai": return summarizeOpenAI(cfg, prompt);
-    case "ollama": return summarizeOllama(cfg, prompt);
-    default:       return summarizeGemini(cfg, prompt);
-  }
+  return runTextPrompt(buildPrompt(transcript, lang));
 }
 
 /**
@@ -133,18 +94,83 @@ function runPrompt(cfg: SummaryConfig, prompt: string): Promise<string> {
  * of plain text (the caller sanitizes it for the filesystem).
  */
 export async function generateSubject(transcript: string): Promise<string> {
-  const cfg = resolveConfig();
   const prompt =
     `Based on the following interpreted conversation, produce a very short, descriptive ` +
     `title of 3 to 7 words that captures the main topic. Reply with ONLY the title — no ` +
     `quotes, no surrounding punctuation, no file extension, no explanation.\n\n` +
     `--- CONVERSATION ---\n${transcript}`;
-  const text = await runPrompt(cfg, prompt);
+  const text = await runTextPrompt(prompt);
   // Keep the first non-empty line only; strip wrapping quotes/backticks.
+  return firstLine(text);
+}
+
+export interface SummaryBundle {
+  en: string;
+  hu: string;
+  subject: string;
+}
+
+/**
+ * Both summaries and the title from a **single** request.
+ *
+ * Three parallel calls used to be free, and on a paid key they are. On the free tier
+ * they are not: the quota is counted in requests per minute (measured: `limit: 5` for
+ * `generate_content_free_tier_requests`), so one summary click spent 3 of the 5 and a
+ * second click inside the same minute was guaranteed to fail with 429 RESOURCE_EXHAUSTED.
+ * One request for all three is the difference between the feature working and not.
+ *
+ * The caller falls back to the per-language prompts for whatever comes back empty, so a
+ * model that ignores the section headers degrades to the old cost instead of to nothing.
+ */
+export async function generateSummaryBundle(transcript: string): Promise<SummaryBundle> {
+  const { shape } = summaryDepth(transcript);
+  const prompt =
+    `Summarize the following interpreted conversation twice — once in English, once in ` +
+    `Hungarian — and give it a short title. Highlight the main topics, key points and any ` +
+    `action items. Do not repeat the text verbatim.\n\n` +
+    `${shape} The two summaries must cover the same ground at the same length.\n\n` +
+    `Reply in exactly this format, with these three headers and nothing else:\n\n` +
+    `### SUMMARY (EN)\n<the English summary>\n\n` +
+    `### SUMMARY (HU)\n<the same summary in Hungarian>\n\n` +
+    `### TITLE\n<a descriptive title of 3 to 7 words, plain text, no quotes>\n\n` +
+    `--- CONVERSATION ---\n${transcript}`;
+  return parseSummaryBundle(await runTextPrompt(prompt));
+}
+
+/** First non-empty line, without wrapping quotes or backticks. */
+function firstLine(text: string): string {
   return text
     .split("\n")
     .map((l) => l.trim())
     .find((l) => l.length > 0)
     ?.replace(/^["'`]+|["'`]+$/g, "")
     .trim() ?? "";
+}
+
+/**
+ * Split a bundled response into its three parts. Deliberately tolerant: header depth,
+ * casing, a chatty preamble and stray blank lines are all accepted, and a section that
+ * isn't there comes back as "" rather than as some neighbouring text.
+ */
+export function parseSummaryBundle(text: string): SummaryBundle {
+  const HEADER_RE = /^\s{0,3}#{1,6}\s*(summary\s*\(\s*(en|hu)\s*\)|title)\s*$/i;
+  const found: Record<string, string[]> = {};
+  let current: string | null = null;
+
+  for (const line of text.split("\n")) {
+    const match = HEADER_RE.exec(line);
+    if (match) {
+      current = match[2] ? match[2].toLowerCase() : "title";
+      found[current] ??= [];
+      continue;
+    }
+    if (current) found[current].push(line);
+  }
+
+  const section = (key: string) => (found[key] ?? []).join("\n").trim();
+  return {
+    en: section("en"),
+    hu: section("hu"),
+    subject: firstLine(section("title")),
+  };
 }

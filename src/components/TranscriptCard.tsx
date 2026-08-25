@@ -31,6 +31,9 @@ export function TranscriptCard({
   const { tr } = useLang();
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
+  // Recording mode produces no translation at all — render one full-width column
+  // instead of leaving an empty second panel.
+  const hasTranslation = pair.translatedText.trim().length > 0;
 
   const submitNote = () => {
     const trimmed = draft.trim();
@@ -69,7 +72,7 @@ export function TranscriptCard({
           <button
             type="button"
             id={`copy-pair-${pair.id}`}
-            onClick={() => onCopy(`${pair.originalText} ➔ ${pair.translatedText}`, pair.id)}
+            onClick={() => onCopy(hasTranslation ? `${pair.originalText} ➔ ${pair.translatedText}` : pair.originalText, pair.id)}
             className="p-1.5 rounded-lg bg-[var(--bg-subtle)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-muted)] transition-all cursor-pointer"
             title={tr("transcript.copy")}
           >
@@ -81,9 +84,9 @@ export function TranscriptCard({
       </div>
 
       {/* Pair Content */}
-      <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className={`p-4 grid grid-cols-1 gap-3 ${hasTranslation ? "md:grid-cols-2" : ""}`}>
         {/* Source Speech */}
-        <div className="flex flex-col gap-2 border-r border-transparent md:border-[var(--border-medium)] pr-0 md:pr-4.5">
+        <div className={`flex flex-col gap-2 ${hasTranslation ? "border-r border-transparent md:border-[var(--border-medium)] pr-0 md:pr-4.5" : ""}`}>
           <div className="flex items-center gap-2">
             {pair.bidirectional ? (
               <span className="text-[9px] font-bold px-2 py-0.5 rounded font-mono uppercase bg-[var(--bg-muted)] text-[var(--text-muted)] border border-[var(--border-strong)]">
@@ -94,13 +97,21 @@ export function TranscriptCard({
                 {pair.sourceLang}
               </span>
             )}
+            {pair.speaker && (
+              <span className="text-[10px] font-semibold text-[var(--text-secondary)] truncate">
+                {pair.speaker}
+              </span>
+            )}
           </div>
-          <div className="px-4 py-3 bg-[var(--bg-base)] border border-[var(--border-medium)] text-sm font-medium text-[var(--text-primary)]">
+          {/* data-transcript-text marks the regions where selecting text teaches
+              a correction (see the selection handler in App). */}
+          <div data-transcript-text className="px-4 py-3 bg-[var(--bg-base)] border border-[var(--border-medium)] text-sm font-medium text-[var(--text-primary)]">
             {pair.originalText}
           </div>
         </div>
 
-        {/* Target Translation */}
+        {/* Target Translation — absent in recording mode */}
+        {hasTranslation && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2">
             {pair.bidirectional ? (
@@ -113,10 +124,11 @@ export function TranscriptCard({
               </span>
             )}
           </div>
-          <div className={`px-4 py-3 text-sm font-semibold text-[var(--text-primary)] ${t.bgVeryFaint} border ${t.borderFaint} border-l-2 ${t.borderL}`}>
+          <div data-transcript-text className={`px-4 py-3 text-sm font-semibold ${pair.isStreaming ? "text-[var(--text-muted)] italic" : "text-[var(--text-primary)]"} ${t.bgVeryFaint} border ${t.borderFaint} border-l-2 ${t.borderL}`}>
             {pair.translatedText}
           </div>
         </div>
+        )}
       </div>
 
       {/* Attached notes + inline add */}

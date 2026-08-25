@@ -9,6 +9,8 @@ interface ControlsProps {
   sourceLang: string;
   targetLang: string;
   bidirectional: boolean;
+  translate: boolean;
+  speak: boolean;
   isMuted: boolean;
   pairs: TranslationPair[];
   summaryLoading: boolean;
@@ -28,6 +30,8 @@ export function Controls({
   sourceLang,
   targetLang,
   bidirectional,
+  translate,
+  speak,
   isMuted,
   pairs,
   summaryLoading,
@@ -42,7 +46,12 @@ export function Controls({
   onClearTranscript,
 }: ControlsProps) {
   const { lang: uiLang, tr } = useLang();
-  const dirLabel = `${langName(sourceLang, uiLang)} ${bidirectional ? "⇄" : "→"} ${langName(targetLang, uiLang)}`;
+  // Recording mode has no target language, so show the spoken language alone.
+  const dirLabel = translate
+    ? `${langName(sourceLang, uiLang)} ${bidirectional ? "⇄" : "→"} ${langName(targetLang, uiLang)}`
+    : langName(sourceLang, uiLang);
+  // Nothing is being generated to mute when the model is silent.
+  const muteDisabled = !speak;
 
   return (
     <>
@@ -122,14 +131,19 @@ export function Controls({
             id="volume-toggle"
             type="button"
             onClick={onMuteToggle}
+            disabled={muteDisabled}
             className={`p-2.5 rounded-full border transition-all cursor-pointer ${
               isMuted
                 ? "bg-rose-50 border-rose-200 text-rose-600"
                 : "bg-[var(--bg-raised)] border-[var(--border-strong)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-subtle)]"
-            }`}
-            title={isMuted ? tr("controls.unmuteTitle") : tr("controls.muteTitle")}
+            } ${muteDisabled ? "opacity-40 cursor-not-allowed" : ""}`}
+            title={
+              muteDisabled ? tr("controls.muteUnavailable")
+              : isMuted ? tr("controls.unmuteTitle")
+              : tr("controls.muteTitle")
+            }
           >
-            {isMuted ? <VolumeX className="w-4 h-4 animate-pulse" /> : <Volume2 className="w-4 h-4" />}
+            {isMuted || muteDisabled ? <VolumeX className={`w-4 h-4 ${isMuted ? "animate-pulse" : ""}`} /> : <Volume2 className="w-4 h-4" />}
           </button>
 
           {/* Start / stop */}

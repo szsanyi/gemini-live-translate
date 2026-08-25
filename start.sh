@@ -43,7 +43,10 @@ cd "$ROOT_DIR"
 echo "Build indítása..." >>"$LOG_FILE"
 npm run build >>"$LOG_FILE" 2>&1
 
-nohup env NODE_ENV=production node --loader tsx server.ts >>"$LOG_FILE" 2>&1 &
+# Run the bundle produced by the build above (same as `npm start`). Not
+# `node --loader tsx server.ts`: --loader is deprecated in Node >= 20.6 and
+# current tsx refuses it, requiring --import instead.
+nohup env NODE_ENV=production node dist/server.cjs >>"$LOG_FILE" 2>&1 &
 APP_PID=$!
 echo "$APP_PID" >"$PID_FILE"
 

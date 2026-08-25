@@ -2,8 +2,11 @@ import { type TranslationPair, type NoteEntry, type SummaryEntry } from "../type
 import { formatSrtTime } from "./time";
 
 /**
- * Build a bilingual SRT subtitle string from a list of translation pairs.
- * Each cue contains the original text on line 1 and the translation on line 2.
+ * Build an SRT subtitle string from a list of translation pairs.
+ *
+ * Each cue carries the original text on line 1 and the translation on line 2. In
+ * recording mode there is no translation, so the cue stays single-line rather than
+ * carrying a blank second line.
  */
 export function buildSrt(pairs: TranslationPair[]): string {
   return pairs
@@ -14,13 +17,14 @@ export function buildSrt(pairs: TranslationPair[]): string {
       // non-overlapping real-time subtitle track.
       const nextStart = pairs[index + 1]?.startMs;
       if (nextStart != null && nextStart > start) end = Math.min(end, nextStart);
-      return [
+      const lines = [
         `${index + 1}`,
         `${formatSrtTime(start)} --> ${formatSrtTime(end)}`,
         pair.originalText,
-        pair.translatedText,
-        "",
-      ].join("\n");
+      ];
+      if (pair.translatedText.trim()) lines.push(pair.translatedText);
+      lines.push("");
+      return lines.join("\n");
     })
     .join("\n");
 }
@@ -59,7 +63,7 @@ export const ALL_EXPORT_OPTIONS: ExportOptions = {
 };
 
 export type TranscriptBlock =
-  | { kind: "pair"; index: number; time: string; src: string; tgt: string; original: string; translated: string; notes: { time: string; text: string }[] }
+  | { kind: "pair"; index: number; speaker: string; time: string; src: string; tgt: string; original: string; translated: string; notes: { time: string; text: string }[] }
   | { kind: "note"; time: string; text: string }
   | { kind: "summary"; time: string; en: string; hu: string };
 
@@ -98,6 +102,7 @@ export function buildTranscriptBlocks(
       blocks.push({
         kind: "pair",
         index,
+        speaker: p.speaker ?? "",
         time: p.timestamp.toLocaleTimeString(),
         src: p.sourceLang.toUpperCase(),
         tgt: p.targetLang.toUpperCase(),
@@ -127,8 +132,11 @@ export function renderTranscriptText(
   for (const b of blocks) {
     if (b.kind === "pair") {
       lines.push(opts.timestamp ? `[${b.index}] (${b.time})` : `[${b.index}]`);
-      if (opts.sourceText) lines.push(`${b.src}: ${b.original}`);
-      if (opts.targetText) lines.push(`${b.tgt}: ${b.translated}`);
+      if (opts.sourceText) {
+        lines.push(b.speaker ? `${b.src} · ${b.speaker}: ${b.original}` : `${b.src}: ${b.original}`);
+      }
+      // Recording-mode blocks have no translation — don't emit a bare label.
+      if (opts.targetText && b.translated) lines.push(`${b.tgt}: ${b.translated}`);
       if (opts.notes) for (const n of b.notes) lines.push(`   ${labels.noteLabel}: ${n.text}`);
       lines.push(SEP);
     } else if (b.kind === "note") {
@@ -158,8 +166,10 @@ export function renderTranscriptMarkdown(
   for (const b of blocks) {
     if (b.kind === "pair") {
       out.push(opts.timestamp ? `### [${b.index}] · ${b.time}` : `### [${b.index}]`, "");
-      if (opts.sourceText) out.push(`- **${b.src}:** ${b.original}`);
-      if (opts.targetText) out.push(`- **${b.tgt}:** ${b.translated}`);
+      if (opts.sourceText) {
+        out.push(b.speaker ? `- **${b.src} · ${b.speaker}:** ${b.original}` : `- **${b.src}:** ${b.original}`);
+      }
+      if (opts.targetText && b.translated) out.push(`- **${b.tgt}:** ${b.translated}`);
       out.push("");
       if (opts.notes) {
         for (const n of b.notes) out.push(`> 📝 ${n.text}`);

@@ -15,7 +15,15 @@ import path from "path";
  * the filename) instead of creating a new dated variant.
  */
 
-const DEFAULT_VAULT_DIR = "/home/sanyi/Dokumentumok/Obsidian Vault (Work)/meetings/";
+/**
+ * Default vault location: a folder inside the project, so a fresh checkout can
+ * save notes without any configuration. Point OBSIDIAN_VAULT_DIR at a real
+ * Obsidian vault to write there instead.
+ *
+ * Deliberately not an absolute path under /home — a hardcoded home directory
+ * fails with EACCES on any machine whose user differs.
+ */
+const DEFAULT_VAULT_DIR = path.join(process.cwd(), "data", "vault", "meetings");
 
 /** Matches the note filename scheme: "YYYY-MM-DD HH-MM subject.md". */
 const NOTE_NAME_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2}) (.+)\.md$/;
@@ -32,21 +40,74 @@ function sanitizeFilename(s: string): string {
 
 const pad = (n: number): string => String(n).padStart(2, "0");
 
+/**
+ * Obsidian tags cannot contain spaces — a "client call" tag would be read as the
+ * tag "client" followed by loose text. Convert to dashes and strip characters
+ * Obsidian does not accept in a tag.
+ */
+function obsidianTag(tag: string): string {
+  return tag
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^\p{L}\p{N}_\-/]/gu, "")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 /** Assemble the note file contents: Obsidian YAML frontmatter + Markdown body. */
-function buildContent(dateStr: string, hh: string, mm: string, subject: string, markdown: string): string {
+function buildContent(
+  dateStr: string,
+  hh: string,
+  mm: string,
+  subject: string,
+  markdown: string,
+  tags: string[] = [],
+): string {
+  // The user's own tags join the two the app always applies.
+  const own = tags.map(obsidianTag).filter(Boolean);
+  const all = ["meeting", "livetranslate", ...own.filter((x) => x !== "meeting" && x !== "livetranslate")];
   const frontmatter = [
     "---",
     `title: "${subject.replace(/"/g, "'")}"`,
     `date: ${dateStr}`,
     `time: "${hh}:${mm}"`,
     "tags:",
-    "  - meeting",
-    "  - livetranslate",
+    ...all.map((x) => `  - ${x}`),
     "---",
     "",
     "",
   ].join("\n");
   return frontmatter + markdown;
+}
+
+/** Absolute, resolved path of the configured vault. */
+function resolvedVault(): string {
+  return path.resolve(process.env.OBSIDIAN_VAULT_DIR || DEFAULT_VAULT_DIR);
+}
+
+/** True when `p` sits inside the configured vault. */
+function insideVault(p: string): boolean {
+  const vault = resolvedVault();
+  return p === vault || p.startsWith(vault + path.sep);
+}
+
+/**
+ * Delete a note this app previously wrote.
+ *
+ * Used when a recording is deleted together with its Obsidian note. Guarded
+ * deliberately tightly, because it removes a file from the user's own vault:
+ * the name must match the scheme this app generates, and the path must resolve
+ * inside the configured vault. Anything else is refused rather than deleted.
+ */
+export async function deleteVaultNote(notePath: string): Promise<void> {
+  const resolved = path.resolve(notePath);
+  if (!insideVault(resolved)) {
+    throw new Error("Refusing to delete a note outside the configured vault.");
+  }
+  if (!NOTE_NAME_RE.test(path.basename(resolved))) {
+    throw new Error("Refusing to delete a file that this app did not create.");
+  }
+  await fs.rm(resolved, { force: true });
 }
 
 export interface ObsidianSaveResult {
@@ -61,19 +122,19 @@ export async function saveToObsidian(
   subject: string,
   existingPath?: string,
   when: Date = new Date(),
+  tags: string[] = [],
 ): Promise<ObsidianSaveResult> {
   const vaultDir = process.env.OBSIDIAN_VAULT_DIR || DEFAULT_VAULT_DIR;
-  const resolvedVault = path.resolve(vaultDir);
 
   // Update in place when a valid prior path inside this vault is supplied.
   if (existingPath) {
     const resolved = path.resolve(existingPath);
     const base = path.basename(resolved);
     const m = base.match(NOTE_NAME_RE);
-    if (m && (resolved === resolvedVault || resolved.startsWith(resolvedVault + path.sep))) {
+    if (m && insideVault(resolved)) {
       const [, dateStr, hh, mm, existingSubject] = m;
       await fs.mkdir(path.dirname(resolved), { recursive: true });
-      await fs.writeFile(resolved, buildContent(dateStr, hh, mm, existingSubject, markdown), "utf-8");
+      await fs.writeFile(resolved, buildContent(dateStr, hh, mm, existingSubject, markdown, tags), "utf-8");
       return { path: resolved, subject: existingSubject, updated: true };
     }
   }
@@ -91,6 +152,6 @@ export async function saveToObsidian(
   const filename = `${dateStr} ${timeStr} ${cleanSubject}.md`;
   const filePath = path.join(dir, filename);
 
-  await fs.writeFile(filePath, buildContent(dateStr, hh, mm, cleanSubject, markdown), "utf-8");
+  await fs.writeFile(filePath, buildContent(dateStr, hh, mm, cleanSubject, markdown, tags), "utf-8");
   return { path: filePath, subject: cleanSubject, updated: false };
 }

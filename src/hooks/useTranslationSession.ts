@@ -48,6 +48,9 @@ export function useTranslationSession(callbacks: SessionCallbacks) {
         sourceLang: config.sourceLang,
         targetLang: config.targetLang,
         bidirectional: config.bidirectional,
+        translate: config.translate,
+        speak: config.speak,
+        corrections: config.corrections,
       };
       socket.send(JSON.stringify(msg));
     };

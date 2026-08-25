@@ -9,16 +9,31 @@ import { NotesInput } from "./components/NotesInput";
 import { Controls } from "./components/Controls";
 import { ExportDialog } from "./components/ExportDialog";
 import { ObsidianDialog } from "./components/ObsidianDialog";
+import { RecordingsDrawer } from "./components/RecordingsDrawer";
+import { SessionBar } from "./components/SessionBar";
 import { TranslationPair, NoteEntry, SummaryEntry, AudioSourceType } from "./types";
-import { allowedSourceCodes, allowedTargetCodes, supportsBidirectional } from "@/shared/languages";
+import { allowedSourceCodes, allowedTargetCodes, supportsBidirectional, TRANSCRIPTION_MODEL } from "@/shared/languages";
 import { ThemeKey, ThemeConfig, THEMES, DEFAULT_THEME } from "./themes";
 import { buildSrt, buildTranscript, buildTranscriptBlocks, renderTranscriptText, renderTranscriptMarkdown, triggerDownload, type ExportOptions } from "./lib/export";
 import { downloadTranscriptPdf } from "./lib/pdf";
-import { SEGMENT_SILENCE_MS } from "./lib/constants";
-import { Lang, DEFAULT_LANG, LANG_STORAGE_KEY, LangContext, translate, StringKey } from "./i18n";
+import { SEGMENT_SILENCE_MS, MAX_SESSION_RECONNECTS, SESSION_RECONNECT_DELAY_MS } from "./lib/constants";
+// Aliased: `translate` is also the name of this session's "translate speech" flag.
+import { Lang, DEFAULT_LANG, LANG_STORAGE_KEY, LangContext, translate as translateString, StringKey } from "./i18n";
 import { useAudioPlayback } from "./hooks/useAudioPlayback";
 import { useAudioCapture } from "./hooks/useAudioCapture";
 import { useTranslationSession } from "./hooks/useTranslationSession";
+import { useSessionStore } from "./hooks/useSessionStore";
+import { newSessionId, normalizeTags, type SessionData, type SessionSummary } from "@/shared/session";
+import {
+  applyCorrections,
+  dedupeRules,
+  serializeRule,
+  parseRules,
+  type CorrectionRule,
+} from "@/shared/corrections";
+import { CorrectionDialog } from "./components/CorrectionDialog";
+import { ImportDialog } from "./components/ImportDialog";
+import { cuesToPairs, type Cue } from "@/shared/transcriptImport";
 
 export default function App() {
   // Session UI configurations
@@ -26,6 +41,11 @@ export default function App() {
   const [sourceLang, setSourceLang] = useState<string>("hu");
   const [targetLang, setTargetLang] = useState<string>("en");
   const [bidirectional, setBidirectional] = useState<boolean>(false);
+  // Session mode. translate=false → plain recording; translate && !speak →
+  // translated transcript, where a text model translates each finished segment
+  // instead of the Live model speaking it. Both are locked once a session starts.
+  const [translate, setTranslate] = useState<boolean>(true);
+  const [speak, setSpeak] = useState<boolean>(true);
   const [audioSource, setAudioSource] = useState<AudioSourceType>("microphone");
 
   // App States
@@ -66,6 +86,24 @@ export default function App() {
   const [sessionSubject, setSessionSubject] = useState<string | null>(null);
   const [obsidianSavedPath, setObsidianSavedPath] = useState<string | null>(null);
   const [obsidianDialogOpen, setObsidianDialogOpen] = useState(false);
+
+  // Session store: which recording is open, and the library drawer.
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [recordingsOpen, setRecordingsOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [sessionTags, setSessionTags] = useState<string[]>([]);
+  // Corrections. Session rules live with the recording; global ones are kept on the
+  // server and apply everywhere. Both are used for substitution and as a glossary.
+  const [sessionCorrections, setSessionCorrections] = useState<CorrectionRule[]>([]);
+  const [globalCorrections, setGlobalCorrections] = useState<CorrectionRule[]>([]);
+  const [correctionMode, setCorrectionMode] = useState(false);
+  const [correctionOpen, setCorrectionOpen] = useState(false);
+  const [correctionHeard, setCorrectionHeard] = useState("");
+  const [titleGenerating, setTitleGenerating] = useState(false);
+  // Only ever auto-name a given recording once, so a stopped-and-resumed session
+  // doesn't keep spending calls on a name it already has.
+  const autoTitledRef = useRef<string | null>(null);
+  const store = useSessionStore();
   const [theme, setTheme] = useState<ThemeKey>(() => {
     const stored = localStorage.getItem("theme") as ThemeKey;
     return THEMES[stored] ? stored : DEFAULT_THEME;
@@ -81,20 +119,25 @@ export default function App() {
   const lastChunkMsRef = useRef<number>(0);
   // Pending pause-based segmentation timer.
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const chatBottomRef = useRef<HTMLDivElement>(null);
+
+  // Recorded time carried over from earlier runs of this session. Cue offsets
+  // continue from here, so resuming a recording doesn't restart subtitle timing at
+  // zero and overlap the existing cues.
+  const elapsedBeforeRef = useRef(0);
+  const sessionCreatedAtRef = useRef<Date | null>(null);
 
   const playback = useAudioPlayback();
   const capture = useAudioCapture();
 
   // Breaks the circular dep between stopTranslating and session callbacks
   const stopRef = useRef<() => void>(() => {});
+  // Same, for the automatic reconnect after an unexpected close.
+  const reconnectRef = useRef<() => void>(() => {});
+  // Consecutive automatic reconnects; reset on every successful connect.
+  const reconnectsRef = useRef(0);
   // True while capture is running — lets a mid-session reconnect (language swap)
   // reuse the live mic/tab stream instead of re-prompting for it.
   const captureActiveRef = useRef(false);
-
-  useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [pairs, activeInput, activeTranslation]);
 
   useEffect(() => {
     const handleResize = () => setIsSidebarMode(window.innerWidth < 768);
@@ -108,17 +151,73 @@ export default function App() {
   useEffect(() => { localStorage.setItem("showVisualizer", String(showVisualizer)); }, [showVisualizer]);
 
   const tr = useCallback(
-    (key: StringKey, vars?: Record<string, string | number>) => translate(lang, key, vars),
+    (key: StringKey, vars?: Record<string, string | number>) => translateString(lang, key, vars),
     [lang],
   );
+
+  // Every rule in force: the recording's own plus the global dictionary.
+  const activeCorrections = dedupeRules([...globalCorrections, ...sessionCorrections]);
+  /** Strip rules down to what the model's glossary needs. */
+  const glossaryFor = (rules: CorrectionRule[]) => rules.map((r) => ({ heard: r.heard, meant: r.meant }));
+  // Read in socket callbacks and the segment finalizer, which must always see the
+  // current list rather than the one captured when the session opened.
+  const correctionsRef = useRef<CorrectionRule[]>(activeCorrections);
+  correctionsRef.current = activeCorrections;
+
+  // While correction mode is on, a selection inside the transcript opens the
+  // dialog with the selected text prefilled. Listening on mouseup/touchend rather
+  // than selectionchange means the dialog opens once, when the selection is done.
+  useEffect(() => {
+    if (!correctionMode) return;
+    const onSelectionDone = () => {
+      const selection = window.getSelection();
+      const text = selection?.toString().trim() ?? "";
+      if (!text || text.length > 200) return;
+      // Only text inside a transcript card counts, not stray page selections.
+      const node = selection?.anchorNode;
+      const el = node instanceof Element ? node : node?.parentElement;
+      if (!el?.closest("[data-transcript-text]")) return;
+      setCorrectionHeard(text);
+      setCorrectionOpen(true);
+    };
+    document.addEventListener("mouseup", onSelectionDone);
+    document.addEventListener("touchend", onSelectionDone);
+    return () => {
+      document.removeEventListener("mouseup", onSelectionDone);
+      document.removeEventListener("touchend", onSelectionDone);
+    };
+  }, [correctionMode]);
+
+  // Load the global dictionary once; it is small and needed before the first start.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/corrections");
+        if (!res.ok) return;
+        const data = await res.json();
+        setGlobalCorrections(parseRules(data.corrections));
+      } catch (e) {
+        console.warn("Could not load the global corrections:", e);
+      }
+    })();
+  }, []);
 
   // Keep a ref to the latest finalize so the silence timer never fires a stale one.
   const finalizeRef = useRef<() => void>(() => {});
 
+  /**
+   * Milliseconds from the start of the *session* (not of this run), so cues stay
+   * monotonic when a stored recording is resumed.
+   */
+  const offsetNow = (): number =>
+    sessionStartRef.current > 0
+      ? elapsedBeforeRef.current + (Date.now() - sessionStartRef.current)
+      : elapsedBeforeRef.current;
+
   // Called on every incoming text chunk: records segment start/end and arms a
   // pause timer that closes the segment into its own card after a short silence.
   const registerActivity = () => {
-    const now = sessionStartRef.current > 0 ? Date.now() - sessionStartRef.current : 0;
+    const now = offsetNow();
     if (turnStartMsRef.current === null && sessionStartRef.current > 0) {
       turnStartMsRef.current = now;
     }
@@ -139,14 +238,58 @@ export default function App() {
     setActiveTranslation(activeTranslationRef.current);
   };
 
+  /**
+   * Translate one finished segment with the server-side text model and drop the
+   * result into its own card. Used in translated-transcript mode, where the Live
+   * model is silent so no translation arrives over the socket.
+   *
+   * A failure must not end the recording — the captured text is the valuable part,
+   * so the card keeps its source text and just reports the translation as failed.
+   */
+  const requestSegmentTranslation = useCallback(async (
+    pairId: string,
+    text: string,
+    src: string,
+    tgt: string,
+  ) => {
+    const patch = (translatedText: string) =>
+      setPairs(prev => prev.map(p => (p.id === pairId ? { ...p, translatedText, isStreaming: false } : p)));
+    try {
+      const res = await fetch("/api/translate-text", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Unlike the Live session, this prompt is built per segment, so a rule
+        // added mid-recording improves the very next translation.
+        body: JSON.stringify({
+          text,
+          sourceLang: src,
+          targetLang: tgt,
+          corrections: correctionsRef.current.map(serializeRule),
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      patch(typeof data.translation === "string" ? data.translation : "");
+    } catch (e: any) {
+      console.error("Segment translation failed:", e);
+      patch(tr("translate.failed"));
+    }
+  }, [tr]);
+
   const finalizeCurrentTurn = useCallback(() => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
-    const currInput = activeInputRef.current.trim();
-    const currTranslate = activeTranslationRef.current.trim();
-    const now = sessionStartRef.current > 0 ? Date.now() - sessionStartRef.current : 0;
+    // Substitution is the only thing that fixes the transcript — the ASR ignores
+    // the glossary entirely, so every finished segment gets the rules applied.
+    const rules = correctionsRef.current;
+    const currInput = applyCorrections(activeInputRef.current.trim(), rules);
+    const currTranslate = applyCorrections(activeTranslationRef.current.trim(), rules);
+    const now = offsetNow();
     const endMs = lastChunkMsRef.current || now;
     const startMs = turnStartMsRef.current ?? endMs;
 
@@ -159,18 +302,34 @@ export default function App() {
 
     if (!currInput && !currTranslate) return;
 
+    // The Live model only delivers translations when it speaks; otherwise this
+    // segment has to be translated separately (or not at all, when recording).
+    const needsTextTranslation = translate && !speak && !currTranslate && !!currInput;
+    const id = Math.random().toString();
+
+    let translatedText: string;
+    if (!translate) translatedText = "";
+    else if (currTranslate) translatedText = currTranslate;
+    else if (needsTextTranslation) translatedText = tr("translate.pending");
+    else translatedText = tr("transcript.translationPending");
+
     setPairs(prev => [...prev, {
-      id: Math.random().toString(),
+      id,
       originalText: currInput || tr("transcript.speechCaptured"),
-      translatedText: currTranslate || tr("transcript.translationPending"),
+      translatedText,
       sourceLang,
       targetLang,
       bidirectional,
       timestamp: new Date(),
       startMs,
       endMs,
+      isStreaming: needsTextTranslation || undefined,
     }]);
-  }, [sourceLang, targetLang, bidirectional, tr]);
+
+    if (needsTextTranslation) {
+      void requestSegmentTranslation(id, currInput, sourceLang, targetLang);
+    }
+  }, [sourceLang, targetLang, bidirectional, translate, speak, tr, requestSegmentTranslation]);
 
   finalizeRef.current = finalizeCurrentTurn;
 
@@ -180,6 +339,7 @@ export default function App() {
       if (s === "connected") {
         setStatus("connected");
         setIsActive(true);
+        reconnectsRef.current = 0;
         // On a mid-session reconnect the stream is already live — don't re-prompt.
         if (!captureActiveRef.current) {
           try {
@@ -191,11 +351,29 @@ export default function App() {
           }
         }
       } else if (s === "disconnected") {
+        // A close with the capture still running was not asked for: `stopTranslating`
+        // clears `captureActiveRef` synchronously before it disconnects, so anything
+        // still marked active here died on its own (a Gemini GoAway, a filled context
+        // window, a dropped socket). Reconnect and keep recording — stopping would
+        // mean the user has to notice, rewind the shared tab and start over, which is
+        // exactly what a 43-minute meeting cannot afford.
+        if (captureActiveRef.current && reconnectsRef.current < MAX_SESSION_RECONNECTS) {
+          reconnectsRef.current += 1;
+          console.warn(
+            `Session dropped, reconnecting (${reconnectsRef.current}/${MAX_SESSION_RECONNECTS})`,
+          );
+          setStatus("connecting");
+          window.setTimeout(() => reconnectRef.current(), SESSION_RECONNECT_DELAY_MS);
+          return;
+        }
         stopRef.current();
       }
     },
-    onAudio: (base64) => playback.enqueueChunk(base64),
-    onTranslation: (text) => handleIncomingTranslation(text),
+    // Silent sessions never start the output context, and the server already drops
+    // any audio the model emits anyway — guard here too so a stray chunk can't
+    // resurrect playback.
+    onAudio: (base64) => { if (speak) playback.enqueueChunk(base64); },
+    onTranslation: (text) => { if (translate && speak) handleIncomingTranslation(text); },
     onInputTranscription: (transcript) => handleIncomingInputSpeech(transcript),
     onInterrupted: () => playback.stopSources(),
     onTurnComplete: () => finalizeCurrentTurn(),
@@ -215,6 +393,11 @@ export default function App() {
     captureActiveRef.current = false;
     playback.stop();
     session.disconnect();
+    // Bank the time recorded in this run so a later resume continues after it.
+    if (sessionStartRef.current > 0) {
+      elapsedBeforeRef.current += Date.now() - sessionStartRef.current;
+      sessionStartRef.current = 0;
+    }
   }, [finalizeCurrentTurn, capture.stop, playback.stop, session.disconnect]);
 
   stopRef.current = stopTranslating;
@@ -228,13 +411,21 @@ export default function App() {
     playback.stopSources();
     session.disconnect(true); // silent — no disconnected callback, so no full stop
     setStatus("connecting");
-    session.connect({ model, sourceLang: ns, targetLang: nt, bidirectional, audioSource });
-  }, [finalizeCurrentTurn, playback.stopSources, session.disconnect, session.connect, model, bidirectional, audioSource]);
+    session.connect({ model, sourceLang: ns, targetLang: nt, bidirectional, translate, speak, audioSource, corrections: glossaryFor(correctionsRef.current) });
+  }, [finalizeCurrentTurn, playback.stopSources, session.disconnect, session.connect, model, bidirectional, translate, speak, audioSource]);
+
+  // Reconnect on the same language pair, keeping the live capture. Same mechanism as
+  // the language swap — that already had to reconnect without re-prompting for the
+  // stream, which is exactly what an automatic reconnect needs too.
+  reconnectRef.current = () => restartSessionWithLangs(sourceLang, targetLang);
 
   const startTranslating = async () => {
     try {
       setError(null);
       setStatus("connecting");
+      // A recording always belongs to a stored session; create one on first start
+      // so autosave has somewhere to write from the very first segment.
+      ensureSessionId();
       sessionStartRef.current = Date.now();
       turnStartMsRef.current = null;
       lastChunkMsRef.current = 0;
@@ -242,12 +433,282 @@ export default function App() {
       activeTranslationRef.current = "";
       setActiveInput("");
       setActiveTranslation("");
-      playback.start();
-      session.connect({ model, sourceLang, targetLang, bidirectional, audioSource });
+      // No spoken output → don't open an output AudioContext at all.
+      if (speak) playback.start();
+      session.connect({ model, sourceLang, targetLang, bidirectional, translate, speak, audioSource, corrections: glossaryFor(correctionsRef.current) });
     } catch (e: any) {
       setError(tr("error.startup", { msg: e.message || e }));
       setStatus("disconnected");
       setIsActive(false);
+    }
+  };
+
+  /** Ensure this transcript is backed by a stored session, and return its id. */
+  const ensureSessionId = (): string => {
+    if (sessionId) return sessionId;
+    const id = newSessionId();
+    sessionCreatedAtRef.current = new Date();
+    setSessionId(id);
+    return id;
+  };
+
+  // Autosave. Any change to the transcript, notes, summaries, title or Obsidian
+  // path queues a debounced write; the store collapses bursts into one request and
+  // retries on failure without interrupting the recording.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (pairs.length === 0 && notes.length === 0 && summaries.length === 0) return;
+    const session: SessionData = {
+      version: 1,
+      id: sessionId,
+      createdAt: sessionCreatedAtRef.current ?? new Date(),
+      updatedAt: new Date(),
+      title: sessionSubject,
+      tags: sessionTags,
+      corrections: sessionCorrections,
+      profile: { model, sourceLang, targetLang, bidirectional, translate, speak, audioSource },
+      elapsedMs: elapsedBeforeRef.current + (sessionStartRef.current > 0 ? Date.now() - sessionStartRef.current : 0),
+      pairs,
+      notes,
+      summaries,
+      obsidianPath: obsidianSavedPath,
+      hasAudio: false,
+    };
+    store.scheduleSave(session);
+  }, [
+    sessionId, pairs, notes, summaries, sessionSubject, sessionTags, sessionCorrections, obsidianSavedPath,
+    model, sourceLang, targetLang, bidirectional, translate, speak, audioSource,
+    store.scheduleSave,
+  ]);
+
+  // Write immediately when a recording stops, rather than waiting out the debounce,
+  // and give an unnamed recording a name from what was actually said.
+  useEffect(() => {
+    if (isActive) return;
+    void store.flush();
+    if (sessionId && !sessionSubject && pairs.length > 0 && autoTitledRef.current !== sessionId) {
+      const id = sessionId;
+      // Claim the id up front so a re-render can't fire a second call, but release it
+      // again if the attempt failed: the text model returns a transient 503 often
+      // enough that one blip must not leave the recording permanently unnamed.
+      autoTitledRef.current = id;
+      void generateTitle().then((named) => {
+        if (!named && autoTitledRef.current === id) autoTitledRef.current = null;
+      });
+    }
+  }, [isActive, sessionId, sessionSubject, pairs.length, store.flush]);
+
+  /**
+   * Ask the server for a name based on what was said. Used by the button in the
+   * session bar and once automatically when a recording stops unnamed. Resolves to
+   * whether a name was actually produced, so the automatic path can try again later.
+   */
+  const generateTitle = async (): Promise<boolean> => {
+    if (titleGenerating) return false;
+    if (pairs.length === 0 && notes.length === 0) return false;
+    setTitleGenerating(true);
+    try {
+      const subject = await requestGeneratedSubject();
+      if (!subject.trim()) return false;
+      setSessionSubject(subject.trim());
+      return true;
+    } catch (e: any) {
+      setError(tr("session.titleError", { msg: e?.message ?? e }));
+      return false;
+    } finally {
+      setTitleGenerating(false);
+    }
+  };
+
+  /**
+   * Teach a correction: fix the whole open recording, apply it to everything
+   * recorded from here on, and — when marked global — persist it for every future
+   * recording.
+   */
+  const addCorrection = async (heard: string, meant: string, global: boolean) => {
+    const rule: CorrectionRule = {
+      id: Math.random().toString(36).slice(2),
+      heard,
+      meant,
+      global,
+      createdAt: new Date(),
+    };
+    ensureSessionId();
+    setSessionCorrections((prev) => dedupeRules([...prev, rule]));
+
+    // Retroactive fix across the open recording, both sides of every card and the
+    // notes, so one correction doesn't have to be repeated per occurrence.
+    const only = [rule];
+    setPairs((prev) => prev.map((p) => ({
+      ...p,
+      originalText: applyCorrections(p.originalText, only),
+      translatedText: applyCorrections(p.translatedText, only),
+    })));
+    setNotes((prev) => prev.map((n) => ({ ...n, text: applyCorrections(n.text, only) })));
+
+    setCorrectionOpen(false);
+    setCorrectionHeard("");
+
+    if (global) {
+      const next = dedupeRules([...globalCorrections, rule]);
+      setGlobalCorrections(next);
+      try {
+        const res = await fetch("/api/corrections", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ corrections: next.map(serializeRule) }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (e: any) {
+        setError(tr("corrections.saveError", { msg: e?.message ?? e }));
+      }
+    }
+  };
+
+  const removeCorrection = async (id: string) => {
+    setSessionCorrections((prev) => prev.filter((r) => r.id !== id));
+    if (globalCorrections.some((r) => r.id === id)) {
+      const next = globalCorrections.filter((r) => r.id !== id);
+      setGlobalCorrections(next);
+      try {
+        await fetch("/api/corrections", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ corrections: next.map(serializeRule) }),
+        });
+      } catch (e: any) {
+        setError(tr("corrections.saveError", { msg: e?.message ?? e }));
+      }
+    }
+  };
+
+  const addTag = (tag: string) => {
+    setSessionTags((prev) => normalizeTags([...prev, tag]));
+    ensureSessionId();
+  };
+  const removeTag = (tag: string) => {
+    setSessionTags((prev) => prev.filter((x) => x !== tag));
+  };
+
+  /** Load a stored recording into the main view. It stays fully resumable. */
+  const openSession = async (id: string) => {
+    try {
+      await store.flush(); // don't lose pending changes to the current one
+      const loaded = await store.load(id);
+      finalizeCurrentTurn();
+      if (isActive) stopTranslating();
+
+      setSessionId(loaded.id);
+      sessionCreatedAtRef.current = loaded.createdAt;
+      elapsedBeforeRef.current = loaded.elapsedMs;
+      sessionStartRef.current = 0;
+
+      setPairs(loaded.pairs);
+      setNotes(loaded.notes);
+      setSummaries(loaded.summaries);
+      setSessionSubject(loaded.title);
+      setSessionTags(loaded.tags);
+      setSessionCorrections(loaded.corrections);
+      setObsidianSavedPath(loaded.obsidianPath);
+      // A loaded recording already had its chance at a name; don't auto-name it.
+      autoTitledRef.current = loaded.id;
+
+      // Restore the settings it was recorded with, so resuming continues in kind.
+      setModel(loaded.profile.model || model);
+      setSourceLang(loaded.profile.sourceLang);
+      setTargetLang(loaded.profile.targetLang);
+      setBidirectional(loaded.profile.bidirectional);
+      setTranslate(loaded.profile.translate);
+      setSpeak(loaded.profile.speak);
+      setAudioSource(loaded.profile.audioSource);
+
+      setRecordingsOpen(false);
+    } catch (e: any) {
+      setError(tr("recordings.loadError", { msg: e?.message ?? e }));
+    }
+  };
+
+  /** Detach from the current recording and start with a clean slate. */
+  const startNewSession = () => {
+    void store.flush();
+    if (isActive) stopTranslating();
+    setSessionId(null);
+    sessionCreatedAtRef.current = null;
+    elapsedBeforeRef.current = 0;
+    sessionStartRef.current = 0;
+    setPairs([]);
+    setNotes([]);
+    setSummaries([]);
+    activeInputRef.current = "";
+    activeTranslationRef.current = "";
+    setActiveInput("");
+    setActiveTranslation("");
+    setSessionSubject(null);
+    setSessionTags([]);
+    // Global rules stay in force; the ones taught only for that recording go away.
+    setSessionCorrections([]);
+    setObsidianSavedPath(null);
+    setRecordingsOpen(false);
+    autoTitledRef.current = null;
+  };
+
+  /**
+   * Bring a pasted transcript in as a recording. It becomes an ordinary stored
+   * session: the autosave effect writes it, and it is fully resumable — new live
+   * segments continue from the imported timeline via `elapsedBeforeRef`.
+   */
+  const importTranscript = (cues: Cue[], opts: { sourceLang: string; baseDate: Date }) => {
+    if (cues.length === 0) return;
+    startNewSession();
+
+    const imported = cuesToPairs(cues, opts);
+    const id = newSessionId(opts.baseDate);
+    sessionCreatedAtRef.current = opts.baseDate;
+    // The largest end, not the last one's: two selections pasted out of order leave
+    // non-monotonic offsets, and taking the last would understate the recorded length
+    // so a later live resume overlaps the imported cues.
+    elapsedBeforeRef.current = imported.reduce((max, p) => Math.max(max, p.endMs ?? 0), 0);
+    sessionStartRef.current = 0;
+    setSessionId(id);
+
+    setPairs(imported);
+    // Same route as the UI's translation toggle: a silent session belongs on the only
+    // model that can transcribe without speaking, so the settings panel doesn't show
+    // 3.5 as selected-and-locked and the stored profile matches what a resume can run.
+    // Called before the languages, because its own clamping reads the pre-import pair;
+    // TRANSCRIPTION_MODEL allows every language, so the pair set below stays valid.
+    handleModelChange(TRANSCRIPTION_MODEL);
+    setSourceLang(opts.sourceLang);
+    // Source and target are always kept distinct (CLAUDE.md), even though nothing is
+    // translated here — so that turning translation on afterwards lands in a valid pair.
+    setTargetLang(opts.sourceLang === "en" ? "hu" : "en");
+    // An imported transcript is a plain recording that did not come from a mic.
+    setTranslate(false);
+    setSpeak(false);
+    // It already has its text; don't spend a call naming it automatically.
+    autoTitledRef.current = id;
+
+    setImportOpen(false);
+  };
+
+  const deleteSession = async (s: SessionSummary) => {
+    const title = s.title ?? tr("recordings.untitled");
+    let message = tr("recordings.deleteConfirm", { title });
+    // Name the note explicitly — this removes a file from the user's vault.
+    const loaded = await store.load(s.id).catch(() => null);
+    if (loaded?.obsidianPath) {
+      message += tr("recordings.deleteWithNote", { path: loaded.obsidianPath });
+    }
+    if (!window.confirm(message)) return;
+    try {
+      const result = await store.remove(s.id, true);
+      if (result.noteError) {
+        setError(tr("recordings.noteNotDeleted", { msg: result.noteError }));
+      }
+      // The open recording just vanished — detach the view from it.
+      if (s.id === sessionId) startNewSession();
+    } catch (e: any) {
+      setError(tr("recordings.deleteError", { msg: e?.message ?? e }));
     }
   };
 
@@ -265,21 +726,16 @@ export default function App() {
 
   const clearTranscript = () => {
     if (window.confirm(tr("confirm.clear"))) {
-      setPairs([]);
-      setNotes([]);
-      setSummaries([]);
-      activeInputRef.current = "";
-      activeTranslationRef.current = "";
-      setActiveInput("");
-      setActiveTranslation("");
-      // New session → forget the note title and any prior Obsidian file.
-      setSessionSubject(null);
-      setObsidianSavedPath(null);
       setObsidianDialogOpen(false);
+      // Detaches from the stored recording rather than emptying it: clearing the
+      // screen must not wipe what is already saved in the library.
+      startNewSession();
     }
   };
 
   const addNote = (text: string, pairId?: string) => {
+    // A note is content too — make sure it gets persisted even with no recording.
+    ensureSessionId();
     setNotes(prev => [...prev, { id: Math.random().toString(), text, timestamp: new Date(), pairId }]);
   };
   const updateNote = (id: string, text: string) => {
@@ -404,8 +860,20 @@ export default function App() {
       const res = await fetch("/api/save-obsidian", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // existingPath makes a repeat save overwrite this session's note.
-        body: JSON.stringify({ markdown, subject, existingPath: obsidianSavedPath }),
+        // existingPath makes a repeat save overwrite this session's note; the tags
+        // join the note's frontmatter so the vault can search on them. `when` files
+        // the note under the recording's own date — an imported meeting keeps the
+        // date the user entered instead of today's. Omitted when there is no stored
+        // session yet, so a plain live recording keeps the server's "now".
+        body: JSON.stringify({
+          markdown,
+          subject,
+          existingPath: obsidianSavedPath,
+          tags: sessionTags,
+          ...(sessionCreatedAtRef.current
+            ? { when: sessionCreatedAtRef.current.toISOString() }
+            : {}),
+        }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -441,6 +909,23 @@ export default function App() {
     setSourceLang(ns);
     setTargetLang(nt);
     if (!supportsBidirectional(m)) setBidirectional(false);
+  };
+
+  // Translation off → nothing to speak, so speech goes off with it. Turning
+  // translation back on restores the default interpreter behaviour.
+  const handleTranslateToggle = () => {
+    const next = !translate;
+    setTranslate(next);
+    setSpeak(next);
+    if (!next) handleModelChange(TRANSCRIPTION_MODEL);
+  };
+
+  // Silent sessions are pinned to the only model that can transcribe without
+  // speaking; go through handleModelChange so the language pair is re-clamped too.
+  const handleSpeakToggle = () => {
+    const next = !speak;
+    setSpeak(next);
+    if (!next) handleModelChange(TRANSCRIPTION_MODEL);
   };
 
   // Source/target are always kept distinct and within the model's allowed sets:
@@ -482,6 +967,7 @@ export default function App() {
         onThemeChange={setTheme}
         onToggleVisualizer={() => setShowVisualizer(v => !v)}
         onMobileSettingsToggle={() => setMobileSettingsOpen(o => !o)}
+        onOpenRecordings={() => { setRecordingsOpen(true); void store.refresh(); }}
       />
 
       <main className="flex-1 min-h-0 w-full grid grid-cols-1 xl:grid-cols-4 items-stretch">
@@ -491,6 +977,8 @@ export default function App() {
           sourceLang={sourceLang}
           targetLang={targetLang}
           bidirectional={bidirectional}
+          translate={translate}
+          speak={speak}
           audioSource={audioSource}
           isActive={isActive}
           isSidebarMode={isSidebarMode}
@@ -501,12 +989,36 @@ export default function App() {
           onTargetChange={handleTargetChange}
           onSwapLangs={handleSwapLangs}
           onBidirectionalToggle={() => setBidirectional(b => !b)}
+          onTranslateToggle={handleTranslateToggle}
+          onSpeakToggle={handleSpeakToggle}
           onAudioSourceChange={setAudioSource}
         />
 
         {/* Dialogue Log Frame — fills the available height; the transcript
             scrolls internally instead of stretching the whole page. */}
         <div className="col-span-1 xl:col-span-3 surface-card flex flex-col overflow-hidden min-h-0">
+
+          {/* Name and tags of the open recording. Starting appends to it. */}
+          {sessionId && (
+            <SessionBar
+              title={sessionSubject}
+              tags={sessionTags}
+              isActive={isActive}
+              titleGenerating={titleGenerating}
+              saveFailed={store.saveFailed}
+              canGenerateTitle={pairs.length > 0 || notes.length > 0}
+              correctionMode={correctionMode}
+              correctionCount={activeCorrections.length}
+              t={t}
+              onTitleChange={setSessionSubject}
+              onGenerateTitle={generateTitle}
+              onAddTag={addTag}
+              onRemoveTag={removeTag}
+              onToggleCorrectionMode={() => setCorrectionMode((c) => !c)}
+              onOpenCorrections={() => { setCorrectionHeard(""); setCorrectionOpen(true); }}
+              onNewSession={startNewSession}
+            />
+          )}
 
           {/* Audio Visualizers — hidden by default, toggleable from the header */}
           {showVisualizer && (
@@ -534,12 +1046,12 @@ export default function App() {
             activeTranslation={activeTranslation}
             copiedId={copiedId}
             t={t}
-            chatBottomRef={chatBottomRef}
             onCopy={copyToClipboard}
             onAddNote={addNote}
             onUpdateNote={updateNote}
             onDeleteNote={deleteNote}
             onDownloadSummary={downloadSummary}
+            onImport={() => setImportOpen(true)}
           />
 
           <NotesInput t={t} onAddNote={addNote} />
@@ -549,6 +1061,8 @@ export default function App() {
             sourceLang={sourceLang}
             targetLang={targetLang}
             bidirectional={bidirectional}
+            translate={translate}
+            speak={speak}
             isMuted={isMuted}
             pairs={pairs}
             summaryLoading={summaryLoading}
@@ -641,6 +1155,39 @@ export default function App() {
         t={t}
         onClose={() => setExportOpen(false)}
         onExport={(format, options) => { setExportOpen(false); doExport(format, options); }}
+      />
+
+      <CorrectionDialog
+        open={correctionOpen}
+        heard={correctionHeard}
+        rules={activeCorrections}
+        t={t}
+        onClose={() => { setCorrectionOpen(false); setCorrectionHeard(""); }}
+        onAdd={(heard, meant, global) => { void addCorrection(heard, meant, global); }}
+        onRemove={(id) => { void removeCorrection(id); }}
+      />
+
+      <RecordingsDrawer
+        open={recordingsOpen}
+        sessions={store.sessions}
+        loading={store.listLoading}
+        error={store.listError}
+        currentId={sessionId}
+        t={t}
+        onClose={() => setRecordingsOpen(false)}
+        onOpenSession={openSession}
+        onDeleteSession={deleteSession}
+        // The drawer's panel and the dialog both sit at z-50, above the dialog's
+        // backdrop — left open, its buttons stay clickable beside the modal.
+        onImport={() => { setRecordingsOpen(false); setImportOpen(true); }}
+      />
+
+      <ImportDialog
+        open={importOpen}
+        defaultSourceLang={sourceLang}
+        t={t}
+        onClose={() => setImportOpen(false)}
+        onImport={importTranscript}
       />
 
       <ObsidianDialog
