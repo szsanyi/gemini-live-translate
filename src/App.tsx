@@ -16,15 +16,8 @@ import { allowedSourceCodes, allowedTargetCodes, supportsBidirectional, TRANSCRI
 import { ThemeKey, ThemeConfig, THEMES, DEFAULT_THEME } from "./themes";
 import { buildSrt, buildTranscript, buildTranscriptBlocks, renderTranscriptText, renderTranscriptMarkdown, triggerDownload, type ExportOptions } from "./lib/export";
 import { downloadTranscriptPdf } from "./lib/pdf";
-import { MAX_SESSION_RECONNECTS } from "./lib/constants";
+import { SEGMENT_SILENCE_MS, MAX_SESSION_RECONNECTS } from "./lib/constants";
 import { reconnectDelayMs } from "./lib/reconnect";
-import {
-  closeAfterMs,
-  DEFAULT_SEGMENT_TUNING,
-  readSegmentTuning,
-  shouldCloseNow,
-  type SegmentTuning,
-} from "./lib/segmentation";
 // Aliased: `translate` is also the name of this session's "translate speech" flag.
 import { Lang, DEFAULT_LANG, LANG_STORAGE_KEY, LangContext, translate as translateString, StringKey } from "./i18n";
 import { useAudioPlayback } from "./hooks/useAudioPlayback";
@@ -213,16 +206,6 @@ export default function App() {
   // Keep a ref to the latest finalize so the silence timer never fires a stale one.
   const finalizeRef = useRef<() => void>(() => {});
 
-  // Segment thresholds, overridable without a rebuild — the same escape hatch
-  // `audioDebug` uses in useAudioCapture. Read once; a change needs a page reload.
-  const tuningRef = useRef<SegmentTuning>(DEFAULT_SEGMENT_TUNING);
-  useEffect(() => {
-    let raw: string | null = null;
-    try { raw = localStorage.getItem("segmentTuning"); } catch { /* blocked storage */ }
-    tuningRef.current = readSegmentTuning(raw);
-    if (raw) console.log("[segment] tuning:", tuningRef.current);
-  }, []);
-
   /**
    * Milliseconds from the start of the *session* (not of this run), so cues stay
    * monotonic when a stored recording is resumed.
@@ -232,9 +215,8 @@ export default function App() {
       ? elapsedBeforeRef.current + (Date.now() - sessionStartRef.current)
       : elapsedBeforeRef.current;
 
-  // Called on every incoming text chunk, before it is accumulated: records the
-  // segment's start/end and cancels the pending close, which `scheduleSegmentClose`
-  // re-arms once the chunk is in.
+  // Called on every incoming text chunk: records segment start/end and arms a
+  // pause timer that closes the segment into its own card after a short silence.
   const registerActivity = () => {
     const now = offsetNow();
     if (turnStartMsRef.current === null && sessionStartRef.current > 0) {
@@ -242,40 +224,19 @@ export default function App() {
     }
     lastChunkMsRef.current = now;
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    silenceTimerRef.current = null;
-  };
-
-  /**
-   * Decide when this card closes — see `src/lib/segmentation.ts` for the rule.
-   *
-   * **Must run after the chunk has been accumulated.** With the old fixed 1200 ms
-   * delay the ordering was irrelevant; now the rule reads the whole text, and arming
-   * the timer first would judge the card as it was one chunk ago.
-   */
-  const scheduleSegmentClose = () => {
-    // The source transcript carries the punctuation and the meaning; the translation
-    // stands in only for a session that produces no source text.
-    const text = activeInputRef.current || activeTranslationRef.current;
-    const tuning = tuningRef.current;
-    if (shouldCloseNow(text, tuning)) {
-      finalizeRef.current();
-      return;
-    }
-    silenceTimerRef.current = setTimeout(() => finalizeRef.current(), closeAfterMs(text, tuning));
+    silenceTimerRef.current = setTimeout(() => finalizeRef.current(), SEGMENT_SILENCE_MS);
   };
 
   const handleIncomingInputSpeech = (text: string) => {
     registerActivity();
     activeInputRef.current += text;
     setActiveInput(activeInputRef.current);
-    scheduleSegmentClose();
   };
 
   const handleIncomingTranslation = (text: string) => {
     registerActivity();
     activeTranslationRef.current += text;
     setActiveTranslation(activeTranslationRef.current);
-    scheduleSegmentClose();
   };
 
   /**
