@@ -6,29 +6,15 @@ import { GoogleGenAI } from "@google/genai";
  * place. Fully configurable via env so text work can run on a different
  * provider/key/model than the live translation:
  *
- *   SUMMARY_PROVIDER  gemini | openai | openrouter | ollama   (default: gemini)
+ *   SUMMARY_PROVIDER  gemini | openai | ollama   (default: gemini)
  *   SUMMARY_MODEL     model id                    (provider-specific default)
- *   SUMMARY_API_KEY   key                         (falls back to GEMINI/OPENAI/OPENROUTER key)
+ *   SUMMARY_API_KEY   key                         (falls back to GEMINI/OPENAI key)
  *   SUMMARY_BASE_URL  base URL                    (OpenAI-compatible / Ollama host)
  *
- * The two jobs are **not** the same shape, so each can have its own provider via a
- * TRANSLATE_ prefix (TRANSLATE_PROVIDER / _MODEL / _API_KEY / _BASE_URL):
- *
- *   - the segment translation is many small, latency-sensitive requests — one per
- *     transcript card, ~130 in a half-hour meeting;
- *   - the summary is one large request at the end, where quality matters and latency
- *     does not.
- *
- * Putting both on one account also means one outage takes out both: an OpenAI key
- * with no credit left turned every card into "(translation failed)" *and* lost the
- * recording's title in the same moment.
- *
- * Fallback rule, deliberately all-or-nothing: **without TRANSLATE_PROVIDER the
- * translation simply uses the summary config.** Once TRANSLATE_PROVIDER is set,
- * nothing is inherited from SUMMARY_* — otherwise a half-specified override would
- * hand, say, "gemini-flash-lite-latest" to OpenRouter and fail on every segment.
+ * The env names keep the SUMMARY_ prefix: they were already documented and are in
+ * use, and one text model serving both jobs needs no second set of knobs.
  */
-export type Provider = "gemini" | "openai" | "openrouter" | "ollama";
+export type Provider = "gemini" | "openai" | "ollama";
 
 export interface TextModelConfig {
   provider: Provider;
@@ -253,52 +239,28 @@ export async function withRetry<T>(
 const DEFAULT_MODEL: Record<Provider, string> = {
   gemini: "gemini-flash-latest",
   openai: "gpt-4o-mini",
-  // Only a fallback — OpenRouter's whole point is picking the model yourself, so
-  // SUMMARY_MODEL is expected to be set. Ids are "<vendor>/<model>".
-  openrouter: "openai/gpt-4o-mini",
   ollama: "llama3.1",
 };
 
 const DEFAULT_BASE_URL: Record<Provider, string> = {
   gemini: "",
   openai: "https://api.openai.com/v1",
-  openrouter: "https://openrouter.ai/api/v1",
   ollama: "http://localhost:11434",
 };
 
-/** Which of the two text jobs a config is for. See the module comment. */
-export type TextRole = "summary" | "translate";
-
-function providerFromEnv(raw: string | undefined): Provider {
-  const name = (raw || "gemini").toLowerCase();
-  return name === "openai" || name === "ollama" || name === "openrouter" ? name : "gemini";
-}
-
-/** The key a provider uses when no explicit *_API_KEY was given. */
-function fallbackKeyFor(provider: Provider): string {
-  switch (provider) {
-    case "gemini":     return process.env.GEMINI_API_KEY || "";
-    case "openai":     return process.env.OPENAI_API_KEY || "";
-    case "openrouter": return process.env.OPENROUTER_API_KEY || "";
-    default:           return "";
-  }
-}
-
-function configFor(prefix: "SUMMARY" | "TRANSLATE"): TextModelConfig {
-  const provider = providerFromEnv(process.env[`${prefix}_PROVIDER`]);
+export function resolveConfig(): TextModelConfig {
+  const raw = (process.env.SUMMARY_PROVIDER || "gemini").toLowerCase();
+  const provider: Provider = raw === "openai" || raw === "ollama" ? raw : "gemini";
+  const fallbackKey =
+    provider === "gemini" ? process.env.GEMINI_API_KEY
+    : provider === "openai" ? process.env.OPENAI_API_KEY
+    : "";
   return {
     provider,
-    model: process.env[`${prefix}_MODEL`] || DEFAULT_MODEL[provider],
-    apiKey: process.env[`${prefix}_API_KEY`] || fallbackKeyFor(provider),
-    baseUrl: process.env[`${prefix}_BASE_URL`] || DEFAULT_BASE_URL[provider],
+    model: process.env.SUMMARY_MODEL || DEFAULT_MODEL[provider],
+    apiKey: process.env.SUMMARY_API_KEY || fallbackKey || "",
+    baseUrl: process.env.SUMMARY_BASE_URL || DEFAULT_BASE_URL[provider],
   };
-}
-
-export function resolveConfig(role: TextRole = "summary"): TextModelConfig {
-  // Only a TRANSLATE_PROVIDER splits the two apart; see the module comment for why
-  // this is all-or-nothing rather than field-by-field.
-  if (role === "translate" && process.env.TRANSLATE_PROVIDER) return configFor("TRANSLATE");
-  return configFor("SUMMARY");
 }
 
 async function runGemini(cfg: TextModelConfig, prompt: string): Promise<string> {
@@ -354,39 +316,6 @@ async function runOpenAI(cfg: TextModelConfig, prompt: string): Promise<string> 
   return text;
 }
 
-/** `choices[0].message.content` out of an OpenAI-style chat completion. */
-export function extractChatText(data: unknown): string {
-  const choices = (data as { choices?: unknown })?.choices;
-  if (!Array.isArray(choices)) return "";
-  const content = (choices[0] as { message?: { content?: unknown } })?.message?.content;
-  return typeof content === "string" ? content : "";
-}
-
-/**
- * OpenRouter speaks the OpenAI *chat completions* dialect, not the Responses API the
- * `openai` provider uses — pointing SUMMARY_BASE_URL at it with provider "openai"
- * only earns a 404. Hence its own branch rather than a shared OpenAI-compatible one.
- */
-async function runOpenRouter(cfg: TextModelConfig, prompt: string): Promise<string> {
-  if (!cfg.apiKey) throw new Error("Missing API key for OpenRouter text model (SUMMARY_API_KEY or OPENROUTER_API_KEY).");
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${cfg.apiKey}`,
-      // OpenRouter attributes requests with these; harmless and it keeps the app
-      // identifiable in the account's usage breakdown.
-      "HTTP-Referer": process.env.APP_URL || "http://localhost:3000",
-      "X-Title": "LiveTranslate",
-    },
-    body: JSON.stringify({ model: cfg.model, messages: [{ role: "user", content: prompt }] }),
-  });
-  if (!res.ok) throw httpError("OpenRouter", res, await res.text());
-  const text = extractChatText(await res.json());
-  if (!text) throw new Error("Empty response from OpenRouter.");
-  return text;
-}
-
 async function runOllama(cfg: TextModelConfig, prompt: string): Promise<string> {
   const res = await fetch(`${cfg.baseUrl}/api/chat`, {
     method: "POST",
@@ -412,15 +341,14 @@ export function runPrompt(
 ): Promise<string> {
   return withRetry(() => {
     switch (cfg.provider) {
-      case "openai":     return runOpenAI(cfg, prompt);
-      case "openrouter": return runOpenRouter(cfg, prompt);
-      case "ollama":     return runOllama(cfg, prompt);
+      case "openai": return runOpenAI(cfg, prompt);
+      case "ollama": return runOllama(cfg, prompt);
       default:       return runGemini(cfg, prompt);
     }
   }, retry);
 }
 
-/** Run a prompt on the text model configured for this job. */
-export function runTextPrompt(prompt: string, role: TextRole = "summary"): Promise<string> {
-  return runPrompt(resolveConfig(role), prompt);
+/** Run a prompt on the currently configured text model. */
+export function runTextPrompt(prompt: string): Promise<string> {
+  return runPrompt(resolveConfig(), prompt);
 }

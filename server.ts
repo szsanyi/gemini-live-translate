@@ -13,8 +13,6 @@ import {
   parseClientMsg,
 } from "./shared/protocol.ts";
 import { createGeminiSession } from "./server/providers/gemini.ts";
-import { RotationState, shouldRotateOnSchedule } from "./server/rotation.ts";
-import { StallDetector, SPEECH_RMS, STALL_SPEECH_MS, FIRST_STALL_SPEECH_MS } from "./server/stall.ts";
 import { createOpenAISession } from "./server/providers/openai.ts";
 import { generateSummary, generateSubject, generateSummaryBundle } from "./server/providers/summary.ts";
 import { translateText } from "./server/providers/textTranslate.ts";
@@ -58,58 +56,6 @@ const ROTATE_AT_TOKENS = 5500;
 const ROTATE_INTERVAL_MS = Number.parseInt(process.env.LIVE_ROTATE_MS ?? "", 10) > 0
   ? Number.parseInt(process.env.LIVE_ROTATE_MS!, 10)
   : 5 * 60 * 1000;
-
-/**
- * How long a rotated-away session is kept open after the swap so it can flush the
- * transcript it is still holding. The ASR lags the audio it has already received, so
- * closing the old session at the instant of the swap dropped the tail of whatever was
- * being said — invisible to a speaker who pauses at that moment, a lost phrase to one
- * who does not. Long enough for the flush, short enough that two sessions are never
- * both live for meaningfully long.
- */
-const ROTATE_FLUSH_MS = 1500;
-
-/**
- * Opt-in relay diagnostic: `LIVE_DEBUG=1`.
- *
- * Answers the one question the client-side `audioDebug` counter cannot. That one
- * proved the browser keeps capturing and sending (captured ≈ wall clock, real pauses
- * in the level stats), yet a transcript still arrived ~90 s late and then in one
- * burst. So the lag is downstream of the browser, and the only way to tell the relay
- * apart from Google's ASR is to count both sides of this process: audio chunks in
- * from the client against transcript deltas out from Gemini. Steady audio with a
- * silent transcript means the wait is inside the ASR and no amount of local tuning
- * will move it.
- */
-const LIVE_DEBUG = process.env.LIVE_DEBUG === "1";
-const LIVE_DEBUG_INTERVAL_MS = 5000;
-
-/**
- * Unanswered speech after which the Live session is presumed dead and replaced (see
- * server/stall.ts for what makes this measurable at all). `LIVE_STALL_MS` exists for
- * the same reason as `LIVE_ROTATE_MS`: to provoke the behaviour in seconds instead of
- * waiting for the provider to have a bad afternoon.
- */
-const STALL_MS = Number.parseInt(process.env.LIVE_STALL_MS ?? "", 10) > 0
-  ? Number.parseInt(process.env.LIVE_STALL_MS!, 10)
-  : STALL_SPEECH_MS;
-
-/**
- * Flush window for a stall rotation, longer than the ordinary one. A session that
- * went quiet may be dead — in which case the wait costs nothing — or merely far
- * behind, and a lagging session handed `audioStreamEnd` has been seen to dump its
- * whole backlog at once. Give it room to do that before closing it.
- */
-const STALL_FLUSH_MS = 5000;
-
-/**
- * The same bar for a session that has not produced a single character yet. Measured:
- * the first session of a recording was dead from birth and cost the first 1:28 of the
- * meeting. "Never worked at all" needs less evidence than "went quiet mid-sentence".
- */
-const FIRST_STALL_MS = Number.parseInt(process.env.LIVE_FIRST_STALL_MS ?? "", 10) > 0
-  ? Number.parseInt(process.env.LIVE_FIRST_STALL_MS!, 10)
-  : FIRST_STALL_SPEECH_MS;
 
 /**
  * A client-supplied date, or now. Used for the Obsidian note's filename and
@@ -360,28 +306,10 @@ async function startServer() {
     let isClosed = false;
     let turnTimer: ReturnType<typeof setTimeout> | null = null;
     // Rotation state (see rotateGemini): the params needed to reopen the same session,
-    // the generation bookkeeping that decides which session may still talk to the
-    // client (see RotationState), the session currently flushing its tail, and the
+    // a generation counter so a replaced session's callbacks fall silent, and the
     // backstop timer.
     let geminiParams: GeminiParams | null = null;
-    const rot = new RotationState();
-    // Does this model report `usageMetadata` at all, and where is the live session's
-    // context now? Together they decide whether the backstop timer has any work to do
-    // (see shouldRotateOnSchedule). `liveTokens` belongs to the live session, so a
-    // rotation resets it — the replacement starts from an empty context.
-    let usageReported = false;
-    let liveTokens = 0;
-    /** When the live session opened — the age floor under the token trigger. */
-    let liveSessionAt = Date.now();
-    // Relay counters for LIVE_DEBUG (see above). `lastTranscriptAt` is the useful one:
-    // it turns "the transcript stopped" into a number of seconds.
-    const relayStats = { audioChunks: 0, audioBytes: 0, deltas: 0, chars: 0, lastTranscriptAt: 0 };
-    // Speech that has gone up with nothing coming back. Unlike everything else here,
-    // this is what actually catches a session that died without saying so.
-    const stall = new StallDetector(SPEECH_RMS, STALL_MS, FIRST_STALL_MS);
-    let debugTimer: ReturnType<typeof setInterval> | null = null;
-    let retiringSession: Session | null = null;
-    let retireTimer: ReturnType<typeof setTimeout> | null = null;
+    let geminiGen = 0;
     let rotating = false;
     let rotateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -399,84 +327,23 @@ async function startServer() {
      * Open a Gemini Live session for this client. `gen` stamps every callback, so a
      * session that has since been rotated away can be ignored instead of reporting its
      * own close to the client as a lost connection.
-     *
-     * Two guards, not one: `live` is the session that owns the connection right now,
-     * `relay` also includes the one on its way out, which is still holding the tail of
-     * the current utterance (see RotationState).
      */
     const openGemini = async (gen: number, announce: boolean): Promise<Session> => {
       const p = geminiParams!;
-      const live  = () => rot.isLive(gen) && !isClosed;
-      const relay = () => rot.isRelaying(gen) && !isClosed;
+      const current = () => gen === geminiGen && !isClosed;
       return createGeminiSession(p.modelName, p.lang, geminiApiKey, {
-        onConnected:          () => { if (live() && announce) send(clientWs, { type: "status", status: "connected" }); },
-        onAudio:              (b) => { if (live()) send(clientWs, { type: "audio", audio: b }); },
-        // Transcript text also comes from the retiring session — that tail is speech
-        // the replacement never heard, so dropping it leaves a hole in the transcript.
-        onTranslation:        (t) => { if (relay()) send(clientWs, { type: "translation", text: t }); },
-        onInputTranscription: (t) => {
-          if (!relay()) return;
-          stall.onTranscript(); // any text at all means the session is alive
-          if (LIVE_DEBUG) {
-            relayStats.deltas += 1;
-            relayStats.chars += t.length;
-            relayStats.lastTranscriptAt = Date.now();
-          }
-          send(clientWs, { type: "inputTranscription", transcript: t });
-        },
-        onInterrupted:        ()  => { if (live()) send(clientWs, { type: "interrupted" }); },
-        // Deliberately live-only: a retiring session's flush ends in a turnComplete,
-        // and relaying it would split the sentence being spoken across two cards.
-        onTurnComplete:       ()  => { if (live()) send(clientWs, { type: "turnComplete" }); },
-        onError:              (e) => { if (live()) send(clientWs, { type: "error", error: e }); },
-        onClose:              (r) => {
-          if (!live()) return;
-          // Drop the handle: a closed session silently swallows everything sent to it,
-          // so leaving it in place turns a dead session into a frozen transcript while
-          // the client is still streaming audio at it.
-          geminiSession = null;
-          send(clientWs, { type: "status", status: "disconnected", reason: r });
-        },
+        onConnected:          () => { if (current() && announce) send(clientWs, { type: "status", status: "connected" }); },
+        onAudio:              (b) => { if (current()) send(clientWs, { type: "audio", audio: b }); },
+        onTranslation:        (t) => { if (current()) send(clientWs, { type: "translation", text: t }); },
+        onInputTranscription: (t) => { if (current()) send(clientWs, { type: "inputTranscription", transcript: t }); },
+        onInterrupted:        ()  => { if (current()) send(clientWs, { type: "interrupted" }); },
+        onTurnComplete:       ()  => { if (current()) send(clientWs, { type: "turnComplete" }); },
+        onError:              (e) => { if (current()) send(clientWs, { type: "error", error: e }); },
+        onClose:              (r) => { if (current()) send(clientWs, { type: "status", status: "disconnected", reason: r }); },
         // The two reasons a long meeting used to die, now caught before they happen.
-        onUsage: (total) => {
-          if (!live()) return;
-          usageReported = true;
-          liveTokens = total;
-          if (total >= ROTATE_AT_TOKENS) void rotateGemini(`${total} tokens`);
-        },
-        onGoAway: (left) => { if (live()) void rotateGemini(`GoAway${left ? ` in ${left} ms` : ""}`); },
+        onUsage: (total) => { if (current() && total >= ROTATE_AT_TOKENS) void rotateGemini(`${total} tokens`); },
+        onGoAway: (left) => { if (current()) void rotateGemini(`GoAway${left ? ` in ${left} ms` : ""}`); },
       }, p.glossary);
-    };
-
-    /** Close whatever session is currently flushing, now rather than on its timer. */
-    const closeRetiring = () => {
-      if (retireTimer) { clearTimeout(retireTimer); retireTimer = null; }
-      if (retiringSession) {
-        try { retiringSession.close(); } catch { /* already gone */ }
-        retiringSession = null;
-      }
-    };
-
-    /**
-     * Hand the replaced session a grace period instead of closing it at the swap.
-     *
-     * Its ASR is still behind the audio it was given, so at this instant it holds the
-     * tail of whatever is being said — and the replacement cannot produce that text,
-     * having never heard that audio. `audioStreamEnd` makes it finalize immediately;
-     * `RotationState` keeps relaying its transcript (and only its transcript) until
-     * ROTATE_FLUSH_MS is up.
-     */
-    const retirePrevious = (previous: Session | null, retired: number, flushMs: number) => {
-      closeRetiring();
-      if (!previous || !retired) return;
-      retiringSession = previous;
-      try { previous.sendRealtimeInput({ audioStreamEnd: true }); } catch { /* already gone */ }
-      retireTimer = setTimeout(() => {
-        retireTimer = null;
-        rot.retire(retired);
-        try { retiringSession?.close(); } catch { /* already gone */ }
-        retiringSession = null;
-      }, flushMs);
     };
 
     /**
@@ -492,52 +359,32 @@ async function startServer() {
      * That is what makes this invisible: the client's capture, socket and transcript
      * state are untouched, where a client-side reconnect costs a visible gap.
      */
-    const rotateGemini = async (why: string, flushMs: number = ROTATE_FLUSH_MS) => {
+    const rotateGemini = async (why: string) => {
       if (rotating || isClosed || !geminiParams) return;
       rotating = true;
       const previous = geminiSession;
-      // Reserved, not live: while the replacement is opening, the old session is still
-      // the one hearing the audio, so it must keep producing transcript.
-      const gen = rot.reserve();
+      const gen = ++geminiGen;
       try {
         const next = await openGemini(gen, false);
-        const retired = rot.promote(gen);
         geminiSession = next;           // audio goes to the new session from here on
-        liveTokens = 0;                 // the replacement starts with an empty context
-        liveSessionAt = Date.now();
-        stall.reset();                  // and with nothing owed to it yet
-        retirePrevious(previous, retired, flushMs);
+        try { previous?.close(); } catch { /* already gone */ }
         console.log(`♻️ Gemini session rotated (${why}).`);
         armRotateTimer();
       } catch (err) {
         // Keep the old session: it may still have life left, and losing it here would
-        // cost the recording more than the overflow we were trying to avoid. The
-        // reserved generation was never promoted, so nothing needs undoing.
+        // cost the recording more than the overflow we were trying to avoid.
+        geminiGen = gen - 1;
         console.error("🔴 Gemini rotation failed, keeping the current session:", err);
       } finally {
         rotating = false;
       }
     };
 
-    /**
-     * Backstop: rotate on a timer too, in case the API reports no token usage.
-     *
-     * It only fires when it has something to do. A model that reports usage is already
-     * covered by the token trigger, and replacing a session that is nowhere near the
-     * ceiling spends a Live-session quota slot for nothing — the same quota that
-     * answers `Resource has been exhausted` when a meeting genuinely needs a new
-     * session mid-recording.
-     */
+    /** Backstop: rotate on a timer too, in case the API reports no token usage. */
     const armRotateTimer = () => {
       if (rotateTimer) clearTimeout(rotateTimer);
       rotateTimer = setTimeout(() => {
-        if (isClosed || !geminiSession) return;
-        if (!shouldRotateOnSchedule(usageReported, liveTokens, ROTATE_AT_TOKENS, Date.now() - liveSessionAt)) {
-          console.log(`⏭️ Scheduled rotation skipped (${liveTokens} tokens).`);
-          armRotateTimer();
-          return;
-        }
-        void rotateGemini("scheduled");
+        if (!isClosed && geminiSession) void rotateGemini("scheduled");
       }, ROTATE_INTERVAL_MS);
     };
 
@@ -574,23 +421,6 @@ async function startServer() {
           const mode = !translate ? "record" : speak ? "interpret" : "text-only";
           console.log(`🚀 Session init: ${modelName} / ${lang.sourceLang}→${lang.targetLang}${lang.bidirectional ? " (bidi)" : ""} [${mode}]`);
 
-          if (LIVE_DEBUG && !debugTimer) {
-            relayStats.lastTranscriptAt = Date.now();
-            debugTimer = setInterval(() => {
-              const quiet = Math.round((Date.now() - relayStats.lastTranscriptAt) / 1000);
-              console.log(
-                `📊 relay: audio ${relayStats.audioChunks} chunks / ${Math.round(relayStats.audioBytes / 1024)} KB in, ` +
-                `transcript ${relayStats.deltas} deltas / ${relayStats.chars} chars out, ` +
-                `silent for ${quiet}s, unanswered speech ${Math.round(stall.pendingSpeechMs / 1000)}s, ` +
-                // Token growth is the cost side of the same trade-off: spoken output
-                // fills the context faster, which is what forces the rotations.
-                `tokens ${liveTokens}`,
-              );
-              relayStats.audioChunks = 0; relayStats.audioBytes = 0;
-              relayStats.deltas = 0; relayStats.chars = 0;
-            }, LIVE_DEBUG_INTERVAL_MS);
-          }
-
           if (isOpenAI) {
             if (!openAiApiKey) {
               send(clientWs, { type: "error", error: "A szerveren nincs beállítva az OPENAI_API_KEY! Állítsd be a .env fájlban." });
@@ -620,12 +450,7 @@ async function startServer() {
               const glossary = (parsed.corrections ?? [])
                 .filter((c) => c && typeof c.heard === "string" && typeof c.meant === "string");
               geminiParams = { modelName, lang, glossary };
-              // Promoted before the connect resolves: the SDK fires onopen first, and
-              // the "connected" status the client waits for is gated on being live.
-              const gen = rot.reserve();
-              rot.promote(gen);
-              liveSessionAt = Date.now();
-              geminiSession = await openGemini(gen, true);
+              geminiSession = await openGemini(++geminiGen, true);
               armRotateTimer();
             } catch (createErr: unknown) {
               const msg = createErr instanceof Error ? createErr.message : "Ellenőrizd a beállításokat.";
@@ -637,27 +462,10 @@ async function startServer() {
 
         // ── AUDIO ─────────────────────────────────────────────────────────────
         if (parsed.type === "audio") {
-          if (LIVE_DEBUG) {
-            relayStats.audioChunks += 1;
-            relayStats.audioBytes += parsed.audio.length;
-          }
           if (geminiSession) {
             geminiSession.sendRealtimeInput({
               audio: { data: parsed.audio, mimeType: "audio/pcm;rate=16000" },
             });
-            // The session can stop transcribing long before the API admits it is gone
-            // — measured at 107 s of steady audio with zero text, ended only by a
-            // `Resource has been exhausted` close. Nothing else in this file notices
-            // that: the socket is open, audio is flowing, onClose has not fired.
-            if (stall.onAudio(Buffer.from(parsed.audio, "base64"))) {
-              // Read the counter before reset, so the log says what was actually
-              // measured — a newborn session is judged on a shorter leash than one
-              // that has been working, and the two must be tellable apart.
-              const waited = Math.round(stall.pendingSpeechMs / 1000);
-              stall.reset();
-              console.warn(`🔇 No transcript for ${waited}s of speech — rotating.`);
-              void rotateGemini("transcription stalled", STALL_FLUSH_MS);
-            }
           } else if (openAiWs?.readyState === WebSocket.OPEN) {
             openAiWs.send(JSON.stringify({
               type: "session.input_audio_buffer.append",
@@ -683,9 +491,6 @@ async function startServer() {
       isClosed = true;
       if (turnTimer) clearTimeout(turnTimer);
       if (rotateTimer) clearTimeout(rotateTimer);
-      if (debugTimer) { clearInterval(debugTimer); debugTimer = null; }
-
-      closeRetiring();
 
       if (geminiSession) {
         try { geminiSession.close(); } catch (_) {}

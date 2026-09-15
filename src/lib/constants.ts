@@ -25,16 +25,5 @@ export const SESSION_AUTOSAVE_MS = 3000;
  * instead of an endless reconnect loop.
  */
 export const MAX_SESSION_RECONNECTS = 5;
-/**
- * Base pause before an automatic reconnect, so a refused connection can't spin. The
- * actual wait grows exponentially from here — see `reconnectDelayMs` in lib/reconnect.
- */
+/** Pause before an automatic reconnect, so a refused connection can't spin. */
 export const SESSION_RECONNECT_DELAY_MS = 800;
-/** Ceiling for the exponential reconnect backoff. */
-export const SESSION_RECONNECT_MAX_DELAY_MS = 20000;
-/**
- * Floor for a reconnect after a quota refusal (`Resource has been exhausted`). The
- * bucket refills on a clock, so a sub-second retry is a guaranteed failure that also
- * spends one of the few attempts available.
- */
-export const SESSION_RECONNECT_QUOTA_DELAY_MS = 8000;

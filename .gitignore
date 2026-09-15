@@ -16,5 +16,4 @@ task.md
 package-lock.json
 # Scratch space for subagent-driven plan execution (ledgers, briefs, diffs).
 .superpowers/
-_test/*
 
