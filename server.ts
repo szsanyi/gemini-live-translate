@@ -371,6 +371,8 @@ async function startServer() {
     // rotation resets it — the replacement starts from an empty context.
     let usageReported = false;
     let liveTokens = 0;
+    /** When the live session opened — the age floor under the token trigger. */
+    let liveSessionAt = Date.now();
     // Relay counters for LIVE_DEBUG (see above). `lastTranscriptAt` is the useful one:
     // it turns "the transcript stopped" into a number of seconds.
     const relayStats = { audioChunks: 0, audioBytes: 0, deltas: 0, chars: 0, lastTranscriptAt: 0 };
@@ -502,6 +504,7 @@ async function startServer() {
         const retired = rot.promote(gen);
         geminiSession = next;           // audio goes to the new session from here on
         liveTokens = 0;                 // the replacement starts with an empty context
+        liveSessionAt = Date.now();
         stall.reset();                  // and with nothing owed to it yet
         retirePrevious(previous, retired, flushMs);
         console.log(`♻️ Gemini session rotated (${why}).`);
@@ -529,7 +532,7 @@ async function startServer() {
       if (rotateTimer) clearTimeout(rotateTimer);
       rotateTimer = setTimeout(() => {
         if (isClosed || !geminiSession) return;
-        if (!shouldRotateOnSchedule(usageReported, liveTokens, ROTATE_AT_TOKENS)) {
+        if (!shouldRotateOnSchedule(usageReported, liveTokens, ROTATE_AT_TOKENS, Date.now() - liveSessionAt)) {
           console.log(`⏭️ Scheduled rotation skipped (${liveTokens} tokens).`);
           armRotateTimer();
           return;
@@ -578,7 +581,10 @@ async function startServer() {
               console.log(
                 `📊 relay: audio ${relayStats.audioChunks} chunks / ${Math.round(relayStats.audioBytes / 1024)} KB in, ` +
                 `transcript ${relayStats.deltas} deltas / ${relayStats.chars} chars out, ` +
-                `silent for ${quiet}s, unanswered speech ${Math.round(stall.pendingSpeechMs / 1000)}s`,
+                `silent for ${quiet}s, unanswered speech ${Math.round(stall.pendingSpeechMs / 1000)}s, ` +
+                // Token growth is the cost side of the same trade-off: spoken output
+                // fills the context faster, which is what forces the rotations.
+                `tokens ${liveTokens}`,
               );
               relayStats.audioChunks = 0; relayStats.audioBytes = 0;
               relayStats.deltas = 0; relayStats.chars = 0;
@@ -618,6 +624,7 @@ async function startServer() {
               // the "connected" status the client waits for is gated on being live.
               const gen = rot.reserve();
               rot.promote(gen);
+              liveSessionAt = Date.now();
               geminiSession = await openGemini(gen, true);
               armRotateTimer();
             } catch (createErr: unknown) {

@@ -73,11 +73,27 @@ export class RotationState {
  * come out of is what answers `Resource has been exhausted` when a meeting needs a
  * new session, so a pointless rotation is a real cost paid at the worst moment.
  */
+/**
+ * Longest a Live session may live on the strength of a low token report alone.
+ *
+ * Measured: `gemini-3.5-live-translate-preview` reported **100 tokens for 7.5 minutes**
+ * of audio, which is impossible — the input alone is a multiple of that. A model that
+ * under-reports this way would keep the skip below firing for ever, and the session
+ * would drift toward the 8192 ceiling with nothing watching. The token trigger is an
+ * optimisation; this is the floor under it.
+ */
+export const MAX_SESSION_AGE_MS = 12 * 60 * 1000;
+
 export function shouldRotateOnSchedule(
   usageReported: boolean,
   liveTokens: number,
   rotateAtTokens: number,
+  sessionAgeMs = 0,
+  maxSessionAgeMs = MAX_SESSION_AGE_MS,
 ): boolean {
+  // The safety floor comes first: it must hold even when the usage report says the
+  // session is fine, because the report itself is what cannot be trusted.
+  if (sessionAgeMs >= maxSessionAgeMs) return true;
   if (!usageReported) return true;
   return liveTokens >= rotateAtTokens;
 }

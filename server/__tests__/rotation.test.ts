@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { RotationState, shouldRotateOnSchedule } from "../rotation.ts";
+import { MAX_SESSION_AGE_MS, RotationState, shouldRotateOnSchedule } from "../rotation.ts";
 
 /**
  * The bug these pin down: a rotation used to silence the outgoing session the moment
@@ -110,6 +110,33 @@ describe("shouldRotateOnSchedule", () => {
 
   it("does not skip on the token count alone when usage was never reported", () => {
     // A stale 0 from a model that reports nothing must not be read as "healthy".
+    expect(shouldRotateOnSchedule(false, 0, LIMIT)).toBe(true);
+  });
+});
+
+describe("shouldRotateOnSchedule — the age floor under the token trigger", () => {
+  const LIMIT = 5500;
+  const AGE = MAX_SESSION_AGE_MS;
+
+  it("rotates an old session even when its usage report looks healthy", () => {
+    // Measured: 3.5-live-translate reported 100 tokens for 7.5 minutes of audio.
+    // Trusting that report would keep a session alive until the 8192 ceiling kills it.
+    expect(shouldRotateOnSchedule(true, 100, LIMIT, AGE)).toBe(true);
+    expect(shouldRotateOnSchedule(true, 100, LIMIT, AGE + 60_000)).toBe(true);
+  });
+
+  it("still skips a young healthy session", () => {
+    expect(shouldRotateOnSchedule(true, 100, LIMIT, AGE - 1)).toBe(false);
+    expect(shouldRotateOnSchedule(true, 1200, LIMIT, 60_000)).toBe(false);
+  });
+
+  it("leaves the token trigger in charge below the floor", () => {
+    expect(shouldRotateOnSchedule(true, LIMIT, LIMIT, 60_000)).toBe(true);
+    expect(shouldRotateOnSchedule(false, 0, LIMIT, 60_000)).toBe(true);
+  });
+
+  it("defaults to the old behaviour when no age is supplied", () => {
+    expect(shouldRotateOnSchedule(true, 1200, LIMIT)).toBe(false);
     expect(shouldRotateOnSchedule(false, 0, LIMIT)).toBe(true);
   });
 });
