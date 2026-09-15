@@ -63,7 +63,17 @@ describe("closeAfterMs", () => {
     expect(closeAfterMs(words(D.minWords, true))).toBe(D.sentencePauseMs);
   });
 
-  it("never returns a delay longer than today's timer", () => {
+  it("is patient mid-clause and prompt at a boundary, never the other way round", () => {
+    // The asymmetry that matters: a finished sentence closes on the old timing, an
+    // unfinished one gets longer to finish. Shortening the boundary delay instead
+    // only shrinks the window in which the live card is visible.
+    expect(D.sentencePauseMs).toBeLessThanOrEqual(D.silenceMs);
+    // And neither may drift above the original fixed timer: the pipeline already runs
+    // 4-6 s behind the speaker, so every extra millisecond here is felt.
+    expect(D.silenceMs).toBeLessThanOrEqual(1200);
+  });
+
+  it("never returns a delay longer than the mid-clause wait", () => {
     for (const t of ["", "uh", "It looked so scary.", words(200, true)]) {
       expect(closeAfterMs(t)).toBeLessThanOrEqual(D.silenceMs);
     }

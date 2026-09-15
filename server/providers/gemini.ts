@@ -143,6 +143,8 @@ export async function createGeminiSession(
         if (sc.outputTranscription?.text && speak) {
           callbacks.onTranslation(sc.outputTranscription.text);
         }
+        // `sc.interimInputTranscription` is deliberately not read — measured empty on
+        // this model. See "Measured API constraints" in CLAUDE.md.
         if (sc.inputTranscription?.text) {
           callbacks.onInputTranscription(sc.inputTranscription.text);
         }

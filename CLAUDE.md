@@ -388,6 +388,19 @@ undoing them:
   which is a different channel from the system instruction. Feeding the corrections'
   `meant` values into it is the obvious next attempt at fixing the transcript at the
   source instead of by substitution afterwards. Measure it before trusting it.
+- **There is no live, word-by-word transcript to be had from this model.**
+  `LiveServerContent.interimInputTranscription` is documented as "low latency transcription
+  updated while the user is speaking" — exactly what a live subtitle needs. Measured on
+  `gemini-3.1-flash-live-preview` over 104 seconds of continuous speech: **0 interim messages**
+  and **5 finals**, arriving 16-20 s apart, each carrying a whole utterance at once. Earlier
+  relay statistics over 633 five-second windows agree: median 0 deltas per window, 62% of
+  windows empty, and ~70 characters per delta when one arrives. **The client cannot show words
+  as they are spoken because the words do not arrive as they are spoken**, and no segmentation
+  setting changes that — `src/lib/segmentation.ts` only decides where an already-delivered block
+  is cut. Seeing the transcript appear live needs a streaming ASR that emits interim hypotheses
+  (Deepgram, Google Cloud STT v2, AssemblyAI, Azure Speech); `realtimeInputConfig.automaticActivityDetection`
+  (`silenceDurationMs`, `endOfSpeechSensitivity`) can only make the *blocks* arrive sooner, never
+  make them word-by-word. Untried at the time of writing.
 - **`AudioTranscriptionConfig.diarization` is accepted and then ignored.** The SDK types promise
   both the config flag (`diarization?: boolean`) and the result field
   (`Transcription.speakerLabel`, "e.g. spk_1, spk_2"). Measured on
