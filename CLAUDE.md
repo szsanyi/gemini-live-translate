@@ -418,11 +418,29 @@ After touching `App.tsx`, load the page and check the console; a green lint is n
 
 ### Non-obvious behaviours
 
-- **Pause-based segmentation.** Gemini's live-translate preview streams continuously without firing
-  `turnComplete` per sentence, so `App.registerActivity` arms a `SEGMENT_SILENCE_MS` (1200 ms) timer
-  on every text chunk and closes the segment into its own transcript card / subtitle cue. `finalizeRef`
-  keeps that timer from firing a stale finalizer. OpenAI has no turn signal at all — the server fakes
-  one after 1500 ms of silence (`scheduleTurnComplete`).
+- **Sentence-boundary segmentation.** Gemini's live-translate preview streams continuously without
+  firing `turnComplete` per sentence, so the client decides where a transcript card / subtitle cue
+  ends. The rule lives in **`src/lib/segmentation.ts`** — a pure, exhaustively tested function, not
+  a timer: a whole sentence closes after `SEGMENT_SENTENCE_PAUSE_MS` (600 ms), mid-clause text still
+  waits the full `SEGMENT_SILENCE_MS` (1200 ms), text under `SEGMENT_MIN_WORDS` never gets the short
+  pause, and a word cap (`SEGMENT_SOFT_CAP_WORDS`, taken at the *next* sentence boundary; then
+  `SEGMENT_HARD_CAP_WORDS` anywhere) stops a monologue growing into one huge card.
+  **The fixed 1200 ms timer knew nothing about the sentence it was cutting**: measured over 165 cards
+  from three real recordings, 38% ended mid-clause, and each fragment was then handed to the text
+  model as a standalone unit — which is where `the office here shortly` → `az iroda itt hamarosan`
+  came from. The shorter pause at a boundary is what keeps cards from getting *longer* than the old
+  timer produced.
+  **`scheduleSegmentClose` must run after the chunk is accumulated**, not before like the old
+  `registerActivity` did — the rule reads the whole text, and arming first judges the card as it was
+  one chunk ago. `finalizeRef` still keeps the timer from firing a stale finalizer.
+  Thresholds are overridable without a rebuild via `localStorage.segmentTuning` (JSON, merged over
+  the defaults, validated — a bad value costs its own override and nothing else), the same escape
+  hatch `audioDebug` uses. `shouldCloseNow` already takes a `speakerChanged` flag that nothing sets:
+  it is the hook for an acoustic speaker-change detector, and it can only ever confirm a boundary the
+  sentence rule already offers, never cut on its own.
+  OpenAI has no turn signal at all — the server fakes one after 1500 ms of silence
+  (`scheduleTurnComplete`).
+  Design record: `docs/superpowers/specs/2026-09-15-sentence-boundary-segmentation-design.md`.
 - **The server rotates the Live session before the API can kill it.** `rotateGemini` (server.ts)
   opens a replacement session and only then closes the old one, so client audio keeps flowing into
   the old session until the swap and the client is never told anything happened. Triggers:

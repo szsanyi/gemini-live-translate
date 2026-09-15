@@ -14,6 +14,29 @@ export const TURN_SILENCE_MS = 1500;
  */
 export const SEGMENT_SILENCE_MS = 1200;
 /**
+ * The same, but when the accumulated text already ends a sentence. Half the wait,
+ * because there is nothing left to wait for: a whole sentence is in hand. This is
+ * what keeps sentence-boundary segmentation from making cards longer than the fixed
+ * timer did — they satisfy an extra condition but wait half as long for it.
+ */
+export const SEGMENT_SENTENCE_PAUSE_MS = 600;
+/**
+ * Below this, a card does not get the short pause even if it ends a sentence. A bare
+ * "Yeah." is a complete sentence and a useless card unless speech really stopped.
+ */
+export const SEGMENT_MIN_WORDS = 4;
+/**
+ * Past this, close at the **next** sentence boundary without waiting for silence, so
+ * a monologue does not grow into one huge card. Taken at a boundary, so the cap
+ * itself never cuts a sentence. Measured: only 2% of real cards reach it.
+ */
+export const SEGMENT_SOFT_CAP_WORDS = 60;
+/**
+ * Last resort: close anywhere. Only reachable when the transcript runs on without
+ * punctuation, where there is no boundary to wait for.
+ */
+export const SEGMENT_HARD_CAP_WORDS = 120;
+/**
  * Idle time after the last change before the session is written to disk. Collapses
  * a burst of segments into one write; the worst case on a crash is losing this
  * much of the transcript.
