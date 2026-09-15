@@ -16,7 +16,8 @@ import { allowedSourceCodes, allowedTargetCodes, supportsBidirectional, TRANSCRI
 import { ThemeKey, ThemeConfig, THEMES, DEFAULT_THEME } from "./themes";
 import { buildSrt, buildTranscript, buildTranscriptBlocks, renderTranscriptText, renderTranscriptMarkdown, triggerDownload, type ExportOptions } from "./lib/export";
 import { downloadTranscriptPdf } from "./lib/pdf";
-import { SEGMENT_SILENCE_MS, MAX_SESSION_RECONNECTS, SESSION_RECONNECT_DELAY_MS } from "./lib/constants";
+import { SEGMENT_SILENCE_MS, MAX_SESSION_RECONNECTS } from "./lib/constants";
+import { reconnectDelayMs } from "./lib/reconnect";
 // Aliased: `translate` is also the name of this session's "translate speech" flag.
 import { Lang, DEFAULT_LANG, LANG_STORAGE_KEY, LangContext, translate as translateString, StringKey } from "./i18n";
 import { useAudioPlayback } from "./hooks/useAudioPlayback";
@@ -335,7 +336,7 @@ export default function App() {
 
   // session must be declared before stopTranslating so disconnect() is accessible
   const session = useTranslationSession({
-    onStatus: async (s) => {
+    onStatus: async (s, reason) => {
       if (s === "connected") {
         setStatus("connected");
         setIsActive(true);
@@ -359,11 +360,17 @@ export default function App() {
         // exactly what a 43-minute meeting cannot afford.
         if (captureActiveRef.current && reconnectsRef.current < MAX_SESSION_RECONNECTS) {
           reconnectsRef.current += 1;
+          // Backing off rather than retrying at a fixed 800 ms: when the provider
+          // refused us on quota ("Resource has been exhausted"), the bucket refills on
+          // a clock, so five attempts inside four seconds are five certain failures
+          // followed by a stopped recording. The close reason decides how long to wait.
+          const delay = reconnectDelayMs(reconnectsRef.current, reason);
           console.warn(
-            `Session dropped, reconnecting (${reconnectsRef.current}/${MAX_SESSION_RECONNECTS})`,
+            `Session dropped (${reason || "no reason given"}), reconnecting ` +
+            `${reconnectsRef.current}/${MAX_SESSION_RECONNECTS} in ${delay} ms`,
           );
           setStatus("connecting");
-          window.setTimeout(() => reconnectRef.current(), SESSION_RECONNECT_DELAY_MS);
+          window.setTimeout(() => reconnectRef.current(), delay);
           return;
         }
         stopRef.current();

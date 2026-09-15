@@ -30,6 +30,7 @@ export async function translateText(
     `is already in ${tgt}, return it unchanged.${glossary}\n\n` +
     `--- TEXT ---\n${text}`;
 
-  const out = await runTextPrompt(prompt);
+  // "translate", so this can run on its own provider — see resolveConfig.
+  const out = await runTextPrompt(prompt, "translate");
   return out.trim();
 }

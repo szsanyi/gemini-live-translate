@@ -44,12 +44,27 @@ and refuses only the affected session type.
 |---|---|
 | `GEMINI_API_KEY` | Gemini Live translation models |
 | `OPENAI_API_KEY` | The `gpt-realtime-translate` model |
-| `SUMMARY_PROVIDER` | `gemini` \| `openai` \| `ollama` (default `gemini`) — powers AI summary + note titles |
-| `SUMMARY_MODEL` / `SUMMARY_API_KEY` / `SUMMARY_BASE_URL` | Per-provider overrides; the key falls back to `GEMINI_API_KEY` / `OPENAI_API_KEY` |
+| `SUMMARY_PROVIDER` | `gemini` \| `openai` \| `openrouter` \| `ollama` (default `gemini`) — powers AI summary + note titles |
+| `SUMMARY_MODEL` / `SUMMARY_API_KEY` / `SUMMARY_BASE_URL` | Per-provider overrides; the key falls back to `GEMINI_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` |
+| `TRANSLATE_PROVIDER` / `TRANSLATE_MODEL` / `TRANSLATE_API_KEY` / `TRANSLATE_BASE_URL` | Same four knobs for the *per-segment translation*, so it can run on its own provider |
 | `OBSIDIAN_VAULT_DIR` | Where "Save to Obsidian" writes notes (has a hardcoded default in `server/obsidian.ts`) |
 
 The summary/title provider is deliberately independent of the live-translation provider — a local
 Ollama can title meetings while Gemini does the interpreting.
+
+**The two text jobs can also be split from each other.** They are not the same shape: the segment
+translation is ~130 small latency-sensitive requests in a half-hour meeting, the summary is one large
+request at the end where quality matters and latency does not. Running both on one account also means
+one outage takes out both — measured: an OpenAI key with no credit left turned every card into
+"(translation failed)" *and* lost the recording's title in the same moment. So `TRANSLATE_*` mirrors
+`SUMMARY_*` for the translation only. The fallback is deliberately **all-or-nothing**: without
+`TRANSLATE_PROVIDER` the translation just uses the summary config, and once it is set nothing is
+inherited — a field-by-field fallback would hand `gemini-flash-lite-latest` to OpenRouter and fail on
+every single segment.
+
+**OpenRouter gets its own provider branch, not the `openai` one.** It speaks the OpenAI *chat
+completions* dialect; the `openai` branch posts to the *Responses* API (`/responses`), which
+OpenRouter does not have — pointing `SUMMARY_BASE_URL` at it only earns a 404.
 
 ## Architecture
 
@@ -373,6 +388,15 @@ undoing them:
   which is a different channel from the system instruction. Feeding the corrections'
   `meant` values into it is the obvious next attempt at fixing the transcript at the
   source instead of by substitution afterwards. Measure it before trusting it.
+- **`AudioTranscriptionConfig.diarization` is accepted and then ignored.** The SDK types promise
+  both the config flag (`diarization?: boolean`) and the result field
+  (`Transcription.speakerLabel`, "e.g. spk_1, spk_2"). Measured on
+  `gemini-3.1-flash-live-preview` with two speakers in the audio: the session opened with no
+  error and **every** transcription chunk came back with `speakerLabel` undefined — as did
+  `finished` and `languageCode`. This Live endpoint populates **only `text`** in `Transcription`.
+  So speaker-aware card splitting cannot be built on the Live API; a batch STT with diarization
+  or an acoustic speaker-change detector would be needed instead. Don't re-derive this from the
+  SDK types — they describe a shape the model does not fill in.
 - **Free-tier Gemini keys only have quota for the `*-latest` aliases.** Pinned ids
   (`gemini-2.0-flash`, `gemini-2.5-pro`, `gemini-3-pro-preview`, …) return HTTP 429 with `limit: 0`.
   `gemini-flash-latest` and `gemini-flash-lite-latest` work.
@@ -403,15 +427,59 @@ After touching `App.tsx`, load the page and check the console; a green lint is n
   opens a replacement session and only then closes the old one, so client audio keeps flowing into
   the old session until the swap and the client is never told anything happened. Triggers:
   `usageMetadata.totalTokenCount` reaching `ROTATE_AT_TOKENS` (5500, under the 8192 ceiling), a
-  `goAway`, or `ROTATE_INTERVAL_MS` (5 min) as a backstop for models that report no usage. A
-  generation counter (`geminiGen`) makes a rotated-away session's callbacks fall silent, so its own
-  close is not reported to the client as a lost connection. **This is what actually fixes the
+  `goAway`, or `ROTATE_INTERVAL_MS` (5 min) as a backstop for models that report no usage — and
+  that backstop only fires when it has work to do (`shouldRotateOnSchedule`): a model that reports
+  usage is already covered by the token trigger, so replacing a session sitting at 1200 tokens
+  spends a Live-session quota slot for nothing. Measured in `.run/live-translate.log`: 188 sessions
+  opened for 95 recordings, roughly double, and that quota is what answers `Resource has been
+  exhausted` when a meeting genuinely needs a new session mid-recording. A
+  generation counter (`server/rotation.ts`) makes a rotated-away session's callbacks fall silent, so
+  its own close is not reported to the client as a lost connection. **This is what actually fixes the
   7-10 minute death**, and it is invisible where a client-side reconnect costs a visible gap.
+  **The retiring session keeps relaying transcript for `ROTATE_FLUSH_MS` (1.5 s) after the swap.**
+  Its ASR lags the audio it was already given, so at the swap it is still holding the tail of the
+  current utterance — and the replacement can never produce that text, having never heard that audio.
+  Closing it at the swap (and silencing it from the moment the replacement *started* opening, which
+  is what `++geminiGen` before the `await` did) put a hole in the transcript at every rotation:
+  invisible to a speaker who happened to pause, a lost phrase to a fast, continuous one. Hence the
+  two guards in `RotationState`: `isLive` for control events (close, usage, GoAway, turnComplete) and
+  `isRelaying`, which also covers the session on its way out, for transcript text only. The retiring
+  session is sent `sendRealtimeInput({ audioStreamEnd: true })` so it flushes at once instead of
+  waiting out the grace period. Don't collapse the two guards back into one.
+  A session that closes on its own also **nulls `geminiSession`** — a closed Live session swallows
+  everything sent to it, so keeping the handle turned a dead session into a silently frozen
+  transcript while the client kept streaming audio at it.
   Verified end-to-end with `LIVE_ROTATE_MS=8000` and a synthetic audio client: three rotations in
   30 s while the client saw only `["server-connected","connected"]` — no `disconnected` at all.
-- **A dropped session reconnects itself.** An unexpected close *while the capture is still running*
-  reconnects the provider session (up to `MAX_SESSION_RECONNECTS`) instead of stopping the recording,
-  reusing the live stream. The discriminator is `captureActiveRef`: `stopTranslating` clears it
+- **A Live session stops transcribing long before it admits it is dead.** Measured with
+  `LIVE_DEBUG=1` on a real recording: for **107 seconds** the client sent a perfectly steady
+  39 chunks / 208 KB every 5 s while Gemini returned **zero** transcription deltas — and only then
+  did the API close it with `Resource has been exhausted (e.g. check quota).` Everything spoken in
+  that window was lost, and nothing noticed: the socket was open, audio was flowing, `onClose` had
+  not fired. **One such stall loses more than every rotation hole put together**, so this, not the
+  rotation, is the main answer to "it skips parts". `StallDetector` (`server/stall.ts`) catches it
+  and rotates. **Silence cannot be the signal** — audio chunks keep flowing while nobody speaks, so
+  a wall-clock timer would rotate through every pause in a meeting; what is diagnostic is *speech
+  going up with nothing coming back*, hence the per-chunk RMS and `SPEECH_RMS` (0.01, measured to
+  sit in the gap between speech at -26…-33 dBFS and quiet windows at -43…-50 dBFS). A stall
+  rotation gets a longer flush window (`STALL_FLUSH_MS`) than an ordinary one, because a session
+  that went quiet may be merely far behind rather than dead, and `audioStreamEnd` makes a lagging
+  one dump its backlog. `LIVE_STALL_MS` provokes it in seconds, like `LIVE_ROTATE_MS`.
+  **A session that has never produced a single character is judged on a shorter leash**
+  (`FIRST_STALL_SPEECH_MS`, 7 s of speech against the ordinary 20): "never worked at all" is a
+  far clearer diagnosis than "went quiet mid-sentence". Measured — a recording's very first
+  session was dead from birth and cost its first 1:28. A rotation resets that leash, since the
+  replacement has proven nothing either.
+- **A dropped session reconnects itself, backing off.** An unexpected close *while the capture is
+  still running* reconnects the provider session (up to `MAX_SESSION_RECONNECTS`) instead of stopping
+  the recording, reusing the live stream. The wait comes from `reconnectDelayMs` (`src/lib/reconnect.ts`):
+  exponential from `SESSION_RECONNECT_DELAY_MS` with ±15% jitter, and a floor of
+  `SESSION_RECONNECT_QUOTA_DELAY_MS` when the close reason is a quota refusal (`isQuotaRefusal`
+  matches Gemini's literal `Resource has been exhausted (e.g. check quota).`). **A fixed 800 ms spent
+  the whole budget in four seconds**, which is the one thing that cannot work against a quota — the
+  bucket refills on a clock, so all five attempts failed and the recording stopped. This is the
+  `textModel.ts` rule ("a retry never fights a quota") applied to the Live path; the close reason now
+  reaches `App.onStatus` as its second argument, so don't drop it again. The discriminator is `captureActiveRef`: `stopTranslating` clears it
   synchronously before disconnecting, so anything still marked active in the `disconnected` callback
   died on its own. Stopping instead means the user has to notice the stop, rewind the shared tab and
   start over — which is how the session-limit bug above was first reported, four times in one meeting.

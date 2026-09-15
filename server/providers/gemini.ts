@@ -76,6 +76,8 @@ export async function createGeminiSession(
     responseModalities: [Modality.AUDIO],
     // Never `{}` here — that is the documented switch into automatic language
     // detection, which drifts mid-recording (see spokenLanguageCodes).
+    // No `diarization: true` here on purpose — it is accepted and then ignored by
+    // this model. See "Measured API constraints" in CLAUDE.md.
     inputAudioTranscription: { languageCodes: spokenLanguageCodes(lang) },
     systemInstruction,
     // Without this a long meeting dies twice over, both seen in the server log:
