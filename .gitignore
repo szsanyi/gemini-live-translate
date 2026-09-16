@@ -17,3 +17,6 @@ package-lock.json
 # Scratch space for subagent-driven plan execution (ledgers, briefs, diffs).
 .superpowers/
 
+
+# Local scratch: test fixtures, translations, meeting material. Never committed.
+_test/
