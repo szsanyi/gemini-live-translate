@@ -18,6 +18,21 @@ export interface InitMsg {
   targetLang: string;
   /** Translate both directions between source and target. */
   bidirectional: boolean;
+  /** Translate at all. When false the session only produces a transcript. */
+  translate: boolean;
+  /** Let the model speak. When false it is instructed to stay silent, which is
+   *  where the token saving comes from — the Live models cannot be switched to a
+   *  text-only response modality at all. */
+  speak: boolean;
+  /**
+   * Correction rules to put in front of the model as a glossary. Measured: this
+   * improves the model's own output (the translation) but has no effect on the
+   * input transcription, which the client fixes by substitution instead.
+   *
+   * The system instruction is fixed once a session opens, so rules added mid-session
+   * only reach the model on the next start.
+   */
+  corrections?: Array<{ heard: string; meant: string }>;
 }
 
 export interface AudioInputMsg {

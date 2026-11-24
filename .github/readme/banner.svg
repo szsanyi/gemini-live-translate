@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-label="LiveTranslate — real-time speech interpreter">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#042f2e"/>
+      <stop offset="0.55" stop-color="#0f766e"/>
+      <stop offset="1" stop-color="#14b8a6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.82" cy="0.5" r="0.45">
+      <stop offset="0" stop-color="#5eead4" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#5eead4" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ccfbf1"/>
+      <stop offset="1" stop-color="#5eead4"/>
+    </linearGradient>
+    <clipPath id="r"><rect width="1280" height="320" rx="24"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#r)">
+    <rect width="1280" height="320" fill="url(#bg)"/>
+    <rect width="1280" height="320" fill="url(#glow)"/>
+    <!-- faint grid -->
+    <g stroke="#ffffff" stroke-opacity=".05">
+      <path d="M0 80H1280M0 160H1280M0 240H1280"/>
+      <path d="M160 0V320M320 0V320M480 0V320M640 0V320M800 0V320M960 0V320M1120 0V320"/>
+    </g>
+
+    <!-- waveform: speech in → translation out -->
+    <g fill="url(#bar)">
+      <rect x="800" y="148" width="8" height="24"  rx="4" opacity=".45"/>
+      <rect x="818" y="132" width="8" height="56"  rx="4" opacity=".55"/>
+      <rect x="836" y="110" width="8" height="100" rx="4" opacity=".65"/>
+      <rect x="854" y="124" width="8" height="72"  rx="4" opacity=".7"/>
+      <rect x="872" y="96"  width="8" height="128" rx="4" opacity=".8"/>
+      <rect x="890" y="118" width="8" height="84"  rx="4" opacity=".85"/>
+      <rect x="908" y="140" width="8" height="40"  rx="4" opacity=".9"/>
+    </g>
+    <g fill="none" stroke="#ccfbf1" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity=".9">
+      <path d="M940 160H1000"/>
+      <path d="M988 148L1002 160L988 172"/>
+    </g>
+    <g fill="#ffffff">
+      <rect x="1030" y="140" width="8" height="40"  rx="4" opacity=".9"/>
+      <rect x="1048" y="104" width="8" height="112" rx="4"/>
+      <rect x="1066" y="126" width="8" height="68"  rx="4"/>
+      <rect x="1084" y="90"  width="8" height="140" rx="4"/>
+      <rect x="1102" y="116" width="8" height="88"  rx="4"/>
+      <rect x="1120" y="134" width="8" height="52"  rx="4" opacity=".85"/>
+      <rect x="1138" y="148" width="8" height="24"  rx="4" opacity=".7"/>
+    </g>
+    <text x="872" y="262" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" letter-spacing="2" fill="#ccfbf1" opacity=".8">HU</text>
+    <text x="1076" y="262" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" letter-spacing="2" fill="#ffffff">EN</text>
+
+    <!-- logo mark (lucide "languages") -->
+    <rect x="80" y="84" width="64" height="64" rx="16" fill="#ffffff" fill-opacity=".14" stroke="#ffffff" stroke-opacity=".35"/>
+    <g transform="translate(92 96) scale(1.667)" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>
+    </g>
+
+    <text x="80" y="214" font-family="-apple-system, 'Segoe UI', Inter, system-ui, sans-serif" font-size="64" font-weight="800" letter-spacing="-1.5" fill="#ffffff">LiveTranslate</text>
+    <text x="82" y="256" font-family="-apple-system, 'Segoe UI', Inter, system-ui, sans-serif" font-size="22" font-weight="500" fill="#ccfbf1">Real-time speech interpreter · Gemini Live &amp; OpenAI Realtime</text>
+  </g>
+</svg>

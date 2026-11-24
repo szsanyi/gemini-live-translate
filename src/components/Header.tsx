@@ -1,4 +1,4 @@
-import { Languages, Settings, Moon, Sun, AudioLines } from "lucide-react";
+import { Languages, Settings, Moon, Sun, AudioLines, Library } from "lucide-react";
 import { ThemeKey, ThemeConfig } from "../themes";
 import { useLang } from "../i18n";
 
@@ -10,6 +10,7 @@ interface HeaderProps {
   onThemeChange: (key: ThemeKey) => void;
   onToggleVisualizer: () => void;
   onMobileSettingsToggle: () => void;
+  onOpenRecordings: () => void;
 }
 
 export function Header({
@@ -20,6 +21,7 @@ export function Header({
   onThemeChange,
   onToggleVisualizer,
   onMobileSettingsToggle,
+  onOpenRecordings,
 }: HeaderProps) {
   const { lang, setLang, tr } = useLang();
 
@@ -40,6 +42,17 @@ export function Header({
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Recordings library */}
+        <button
+          id="recordings-open"
+          onClick={onOpenRecordings}
+          className="p-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-raised)] text-xs hover:bg-[var(--bg-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all cursor-pointer flex items-center gap-1.5"
+          title={tr("recordings.open")}
+        >
+          <Library className="w-4 h-4" />
+          <span className="hidden sm:inline font-semibold">{tr("recordings.open")}</span>
+        </button>
+
         {/* Mobile settings toggle */}
         <button
           id="mobile-settings-toggle"

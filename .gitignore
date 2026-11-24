@@ -5,11 +5,17 @@ coverage/
 .DS_Store
 *.log
 .run/
+# Local data: the default Obsidian vault folder and (soon) the session store.
+data/
 .env*
 !.env.example
 .playwright-mcp/
 .vscode/
 
 task.md
-package-lock.json
+# Scratch space for subagent-driven plan execution (ledgers, briefs, diffs).
+.superpowers/
 
+
+# Local scratch: test fixtures, translations, meeting material. Never committed.
+_test/

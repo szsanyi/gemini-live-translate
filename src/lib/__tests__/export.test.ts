@@ -127,3 +127,48 @@ describe("renderTranscriptMarkdown", () => {
     expect(out).toContain("> 📝 Megjegyzés");
   });
 });
+
+describe("speaker attribution in exports", () => {
+  // Named to avoid shadowing the module-level `pair()` helper at the top of this
+  // file, whose defaults (Hungarian source, a translation, subtitle offsets) are
+  // wrong for these cases.
+  const speakerPair = (over: Partial<TranslationPair> = {}): TranslationPair => ({
+    id: "p1",
+    originalText: "See ya.",
+    translatedText: "",
+    sourceLang: "en",
+    targetLang: "en",
+    timestamp: new Date("2026-07-30T09:00:10.000Z"),
+    ...over,
+  });
+
+  it("puts the speaker on the block model", () => {
+    const [block] = buildTranscriptBlocks([speakerPair({ speaker: "Tamás Bognár" })]);
+    expect(block.kind).toBe("pair");
+    if (block.kind === "pair") expect(block.speaker).toBe("Tamás Bognár");
+  });
+
+  it("prefixes the source line in the text export", () => {
+    const txt = renderTranscriptText(buildTranscriptBlocks([speakerPair({ speaker: "Tamás Bognár" })]));
+    expect(txt).toContain("EN · Tamás Bognár: See ya.");
+  });
+
+  it("prefixes the source line in the markdown export", () => {
+    const md = renderTranscriptMarkdown(buildTranscriptBlocks([speakerPair({ speaker: "Tamás Bognár" })]));
+    expect(md).toContain("- **EN · Tamás Bognár:** See ya.");
+  });
+
+  it("emits the plain language label when there is no speaker", () => {
+    const blocks = buildTranscriptBlocks([speakerPair()]);
+    expect(renderTranscriptText(blocks)).toContain("EN: See ya.");
+    expect(renderTranscriptText(blocks)).not.toContain("·");
+    expect(renderTranscriptMarkdown(blocks)).toContain("- **EN:** See ya.");
+  });
+
+  it("leaves subtitle cues free of the speaker name", () => {
+    // An SRT cue is burned into video; a speaker prefix there is noise.
+    const srt = buildSrt([speakerPair({ speaker: "Tamás Bognár", startMs: 10_000, endMs: 12_000 })]);
+    expect(srt).toContain("See ya.");
+    expect(srt).not.toContain("Tamás Bognár");
+  });
+});

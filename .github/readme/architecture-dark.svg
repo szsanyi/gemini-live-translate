@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 344" width="1000" height="344" role="img" aria-label="Audio flows from the microphone or a browser tab through the browser to the Node server, which holds the API keys and talks to the live model; translated speech and text flow back; the server also stores recordings and Obsidian notes.">
+  <style>
+    .card   { fill: #ffffff; stroke: #d0d7de; stroke-width: 1; }
+    .hub    { fill: #f0fdfa; stroke: #0d9488; stroke-width: 1.5; }
+    .eyebrow{ font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; fill: #656d76; }
+    .hub-eb { fill: #0d9488; }
+    .title  { font: 600 15px -apple-system, "Segoe UI", system-ui, sans-serif; fill: #1f2328; }
+    .sub    { font: 400 12px -apple-system, "Segoe UI", system-ui, sans-serif; fill: #656d76; }
+    .mono   { font: 400 11.5px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #656d76; }
+    .label  { font: 500 11px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #656d76; }
+    .line   { stroke: #8c959f; stroke-width: 1.5; fill: none; }
+    .accent { stroke: #0d9488; }
+    .head   { fill: #8c959f; }
+    .head-a { fill: #0d9488; }
+    .note   { font: 400 12px -apple-system, "Segoe UI", system-ui, sans-serif; fill: #656d76; }
+
+      .card   { fill: #161b22; stroke: #30363d; }
+      .hub    { fill: #0d2624; stroke: #2dd4bf; }
+      .eyebrow, .sub, .mono, .label, .note { fill: #8d96a0; }
+      .hub-eb { fill: #2dd4bf; }
+      .title  { fill: #e6edf3; }
+      .line   { stroke: #6e7681; }
+      .accent { stroke: #2dd4bf; }
+      .head   { fill: #6e7681; }
+      .head-a { fill: #2dd4bf; }
+  </style>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" class="head"/>
+    </marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" class="head-a"/>
+    </marker>
+  </defs>
+
+  <!-- top row -->
+  <rect class="card" x="20"  y="40" width="160" height="88" rx="12"/>
+  <text class="eyebrow" x="38" y="64">01 · INPUT</text>
+  <text class="title"   x="38" y="88">Audio</text>
+  <text class="sub"     x="38" y="108">Mic or browser tab</text>
+
+  <rect class="card" x="286" y="40" width="160" height="88" rx="12"/>
+  <text class="eyebrow" x="304" y="64">02 · CLIENT</text>
+  <text class="title"   x="304" y="88">Browser</text>
+  <text class="sub"     x="304" y="108">Web Audio · React</text>
+
+  <rect class="hub"  x="552" y="40" width="160" height="88" rx="12"/>
+  <text class="eyebrow hub-eb" x="570" y="64">03 · SERVER</text>
+  <text class="title"   x="570" y="88">Node relay</text>
+  <text class="sub"     x="570" y="108">Holds every API key</text>
+
+  <rect class="card" x="818" y="40" width="160" height="88" rx="12"/>
+  <text class="eyebrow" x="836" y="64">04 · MODEL</text>
+  <text class="title"   x="836" y="88">Live model</text>
+  <text class="sub"     x="836" y="108">Gemini · OpenAI</text>
+
+  <!-- top row arrows -->
+  <line class="line" x1="184" y1="84" x2="282" y2="84" marker-end="url(#a)"/>
+  <text class="label" x="233" y="76" text-anchor="middle">capture</text>
+
+  <line class="line accent" x1="450" y1="72" x2="548" y2="72" marker-end="url(#b)"/>
+  <text class="label" x="499" y="64" text-anchor="middle">PCM 16 kHz</text>
+  <line class="line accent" x1="548" y1="96" x2="450" y2="96" marker-end="url(#b)"/>
+  <text class="label" x="499" y="114" text-anchor="middle">speech + text</text>
+
+  <line class="line accent" x1="716" y1="84" x2="814" y2="84" marker-start="url(#b)" marker-end="url(#b)"/>
+  <text class="label" x="765" y="76" text-anchor="middle">live session</text>
+
+  <!-- bottom row -->
+  <path class="line" d="M366 132 V206" marker-end="url(#a)"/>
+  <rect class="card" x="286" y="210" width="160" height="70" rx="12"/>
+  <text class="title" x="304" y="238">Output</text>
+  <text class="sub"   x="304" y="258">Speech · transcript</text>
+
+  <path class="line" d="M632 132 V206" marker-end="url(#a)"/>
+  <rect class="card" x="552" y="210" width="160" height="70" rx="12"/>
+  <text class="title" x="570" y="238">Recordings</text>
+  <text class="mono"  x="570" y="258">data/sessions</text>
+
+  <path class="line" d="M716 116 H765 V245 H814" marker-end="url(#a)"/>
+  <rect class="card" x="818" y="210" width="160" height="70" rx="12"/>
+  <text class="title" x="836" y="238">Obsidian</text>
+  <text class="sub"   x="836" y="258">Notes in your vault</text>
+
+  <text class="note" x="20" y="330">The browser never talks to a provider. Keys and provider sessions live on the server only.</text>
+</svg>

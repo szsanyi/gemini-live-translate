@@ -91,11 +91,12 @@ export async function downloadTranscriptPdf(
       write(opts.timestamp ? `[${b.index}] · ${b.time}` : `[${b.index}]`, { size: 11, style: "bold", color: [80, 80, 80] });
       gap(2);
       if (opts.sourceText) {
-        write(b.src, { size: 9, style: "bold", color: [120, 120, 120] });
+        write(b.speaker ? `${b.src} · ${b.speaker}` : b.src, { size: 9, style: "bold", color: [120, 120, 120] });
         write(b.original, { size: 11 });
         gap(3);
       }
-      if (opts.targetText) {
+      // Recording-mode blocks have no translation — skip the label too.
+      if (opts.targetText && b.translated) {
         write(b.tgt, { size: 9, style: "bold", color: [17, 94, 89] });
         write(b.translated, { size: 11 });
       }
